@@ -1,3 +1,5 @@
+import inventory from "./data/inventory";
+
 function App() {
   return (
     <div>
@@ -5,12 +7,14 @@ function App() {
 
       <h2>Inventory</h2>
 
-      <p>Milk - 1 gallon</p>
-      <p>Rice - 10 lbs</p>
-      <p>Eggs - 12</p>
+      {inventory.map((item) => (
+        <p key={item.id}>
+          {item.name}: {item.quantity} {item.unit}
+        </p>
+      ))}
 
     </div>
-  )
+  );
 }
 
-export default App
+export default App;
