@@ -287,8 +287,18 @@ select#pantrySelect { font-weight: 700; color: var(--sage-dark); }
   align-items: center;
 }
 
+/* Grid columns don't shrink below their content's natural width unless told to —
+   without this, the Qty input and long category names (like "Produce") push past
+   the edge of the page instead of shrinking to fit their column. */
+.ingredient-row > * {
+  min-width: 0;
+  width: 100%;
+}
+
 @media (max-width: 700px) {
-  .ingredient-row { grid-template-columns: 1fr 1fr; }
+  .ingredient-row {
+    grid-template-columns: 1fr;
+  }
 }
 
 /* Meal plan */
