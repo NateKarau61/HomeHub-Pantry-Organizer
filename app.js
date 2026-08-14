@@ -713,6 +713,7 @@
 
   let scanner = null;
   let scannerRunning = false;
+  let scannerTeardown = Promise.resolve();
 
   function guessCategoryFromTags(tags) {
     if (!tags || !tags.length) return null;
@@ -737,45 +738,66 @@
       return;
     }
     document.getElementById("scanModal").style.display = "flex";
-    setScanStatus("Point your camera at a barcode. Already have it in stock? Scanning it just adds one to the count.", false);
+    setScanStatus("Starting camera…", false);
+    document.getElementById("scanBtn").disabled = true;
 
-    scanner = new Html5Qrcode("qrReader");
-    const config = {
-      fps: 10,
-      qrbox: { width: 250, height: 150 },
-      formatsToSupport: [
-        Html5QrcodeSupportedFormats.EAN_13,
-        Html5QrcodeSupportedFormats.EAN_8,
-        Html5QrcodeSupportedFormats.UPC_A,
-        Html5QrcodeSupportedFormats.UPC_E,
-        Html5QrcodeSupportedFormats.CODE_128,
-        Html5QrcodeSupportedFormats.QR_CODE
-      ]
-    };
+    // Wait for any previous camera session to fully stop and clear before starting a new one.
+    // Skipping this is what caused the scanner to "re-scan" a frozen leftover frame from last time.
+    scannerTeardown
+      .then(() => {
+        document.getElementById("qrReader").innerHTML = "";
+        scanner = new Html5Qrcode("qrReader");
+        const config = {
+          fps: 10,
+          qrbox: { width: 250, height: 150 },
+          formatsToSupport: [
+            Html5QrcodeSupportedFormats.EAN_13,
+            Html5QrcodeSupportedFormats.EAN_8,
+            Html5QrcodeSupportedFormats.UPC_A,
+            Html5QrcodeSupportedFormats.UPC_E,
+            Html5QrcodeSupportedFormats.CODE_128,
+            Html5QrcodeSupportedFormats.QR_CODE
+          ]
+        };
 
-    scanner.start(
-      { facingMode: "environment" },
-      config,
-      decodedText => {
-        if (!scannerRunning) return; // ignore duplicate fires while we're already handling one
-        scannerRunning = false;
-        handleScannedBarcode(decodedText);
-      },
-      () => { /* per-frame decode errors are normal while searching for a barcode; ignore */ }
-    ).then(() => {
-      scannerRunning = true;
-    }).catch(err => {
-      setScanStatus("Couldn't access the camera: " + (err && err.message ? err.message : err), true);
-    });
+        return scanner.start(
+          { facingMode: "environment" },
+          config,
+          decodedText => {
+            if (!scannerRunning) return; // ignore duplicate fires while we're already handling one
+            scannerRunning = false;
+            handleScannedBarcode(decodedText);
+          },
+          () => { /* per-frame decode errors are normal while searching for a barcode; ignore */ }
+        ).then(() => {
+          scannerRunning = true;
+          setScanStatus("Point your camera at a barcode. Already have it in stock? Scanning it just adds one to the count.", false);
+        });
+      })
+      .catch(err => {
+        setScanStatus("Couldn't access the camera: " + (err && err.message ? err.message : err), true);
+      })
+      .finally(() => {
+        document.getElementById("scanBtn").disabled = false;
+      });
   }
 
   function closeScanModal() {
     document.getElementById("scanModal").style.display = "none";
-    if (scanner && scannerRunning) {
-      scanner.stop().catch(() => {});
-    }
     scannerRunning = false;
+    const s = scanner;
     scanner = null;
+    if (s) {
+      // stop() then clear() tears down the video stream and removes leftover DOM nodes so the
+      // next scan starts from a truly blank state instead of showing a stale frame.
+      scannerTeardown = s.stop().catch(() => {}).then(() => {
+        try { s.clear(); } catch (e) { /* ignore */ }
+        const el = document.getElementById("qrReader");
+        if (el) el.innerHTML = "";
+      });
+    } else {
+      scannerTeardown = Promise.resolve();
+    }
   }
 
   function handleScannedBarcode(code) {
