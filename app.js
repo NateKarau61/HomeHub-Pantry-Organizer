@@ -108,14 +108,36 @@
     renderAll();
   });
 
+  function pantryNameExists(name) {
+    const key = normName(name);
+    return Object.keys(state.pantries).some(p => normName(p) === key);
+  }
+
   document.getElementById("addPantryBtn").addEventListener("click", () => {
-    const name = prompt("Name this storage location (e.g. 'Garage Freezer', 'Basement Shelf'):");
-    if (!name) return;
-    const trimmed = name.trim();
-    if (!trimmed) return;
-    if (state.pantries[trimmed]) { alert("That location already exists."); return; }
-    state.pantries[trimmed] = { items: [] };
-    state.currentPantry = trimmed;
+    document.getElementById("addPantryPanel").style.display = "flex";
+    document.getElementById("newPantryPreset").value = "";
+    document.getElementById("newPantryCustomWrap").style.display = "none";
+    document.getElementById("newPantryCustomName").value = "";
+  });
+
+  document.getElementById("newPantryPreset").addEventListener("change", e => {
+    document.getElementById("newPantryCustomWrap").style.display = e.target.value === "__custom" ? "" : "none";
+  });
+
+  document.getElementById("cancelAddPantryBtn").addEventListener("click", () => {
+    document.getElementById("addPantryPanel").style.display = "none";
+  });
+
+  document.getElementById("confirmAddPantryBtn").addEventListener("click", () => {
+    const preset = document.getElementById("newPantryPreset").value;
+    const name = preset === "__custom"
+      ? document.getElementById("newPantryCustomName").value.trim()
+      : preset;
+    if (!name) { alert("Pick a location or enter a custom name."); return; }
+    if (pantryNameExists(name)) { alert("That location already exists."); return; }
+    state.pantries[name] = { items: [] };
+    state.currentPantry = name;
+    document.getElementById("addPantryPanel").style.display = "none";
     saveState();
     renderAll();
   });
@@ -280,12 +302,32 @@
   // ---------------- Recipes ----------------
   let editingRecipeId = null;
 
+  function findPantryItemByName(name) {
+    const key = normName(name);
+    if (!key) return null;
+    return allItemsAcrossLocations().find(i => normName(i.name) === key) || null;
+  }
+
+  function renderPantryItemNamesDatalist() {
+    const dl = document.getElementById("pantryItemNames");
+    if (!dl) return;
+    const seen = new Map(); // lowercase name -> original-case name
+    allItemsAcrossLocations().forEach(item => {
+      const key = normName(item.name);
+      if (key && !seen.has(key)) seen.set(key, item.name);
+    });
+    dl.innerHTML = Array.from(seen.values())
+      .sort((a, b) => a.localeCompare(b))
+      .map(name => `<option value="${escapeHtml(name)}"></option>`)
+      .join("");
+  }
+
   function ingredientRowTemplate(vals) {
     vals = vals || {};
     const row = document.createElement("div");
     row.className = "ingredient-row";
     row.innerHTML = `
-      <input type="text" class="ing-name" placeholder="Ingredient name" value="${escapeHtml(vals.name || "")}">
+      <input type="text" class="ing-name" list="pantryItemNames" placeholder="Ingredient name" value="${escapeHtml(vals.name || "")}">
       <input type="number" class="ing-qty" placeholder="Qty" min="0" step="0.1" value="${vals.qty != null ? vals.qty : ""}">
       <input type="text" class="ing-unit" placeholder="Unit" value="${escapeHtml(vals.unit || "")}">
       <select class="ing-category">
@@ -294,6 +336,19 @@
       <button type="button" class="btn-danger remove-ing">✕</button>
     `;
     row.querySelector(".remove-ing").addEventListener("click", () => row.remove());
+
+    // Picking (or typing) a name that matches something already in the pantry fills in
+    // its unit and aisle automatically, so you're not re-typing details you already tracked.
+    const nameInput = row.querySelector(".ing-name");
+    nameInput.addEventListener("input", () => {
+      const match = findPantryItemByName(nameInput.value);
+      if (!match) return;
+      const unitInput = row.querySelector(".ing-unit");
+      const catSelect = row.querySelector(".ing-category");
+      if (!unitInput.value && match.unit) unitInput.value = match.unit;
+      if (match.category) catSelect.value = match.category;
+    });
+
     return row;
   }
 
@@ -856,6 +911,7 @@
     renderRecipeList();
     renderMealPlan();
     renderShoppingList();
+    renderPantryItemNamesDatalist();
   }
 
   window.pantryApp = {
