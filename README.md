@@ -1,6 +1,6 @@
 # Pantry Organizer
 
-A free, private pantry tracker and meal planner — inspired by [PantryTrack](https://pantrytrack.app/)'s "track your pantry, plan meals, cut food waste" idea, built as a simple static site like your [Budget Planner](https://natekarau61.github.io/Budget-Planner/). No accounts, no server, nothing uploaded — your data saves automatically in your browser (`localStorage`), with export/import for backups or moving to another device.
+https://natekarau61.github.io/HomeHub-Pantry-Organizer/
 
 **Live demo:** enable GitHub Pages on this repo (see below) and it'll be at `https://<your-username>.github.io/Pantry-Organizer/`
 
