@@ -1,0 +1,255 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Pantry Organizer — Track Your Pantry, Plan Meals, Cut Food Waste</title>
+<meta name="description" content="A free, private pantry tracker and meal planner. Log ingredients, get expiry alerts, plan weekly meals, and auto-generate a shopping list grouped by aisle. Nothing is uploaded — your data stays in your browser.">
+<link rel="stylesheet" href="styles.css">
+<script src="https://unpkg.com/html5-qrcode@2.3.8/html5-qrcode.min.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-auth-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore-compat.js"></script>
+<script src="firebase-config.js"></script>
+</head>
+<body>
+
+<!-- LOGIN / SIGNUP SCREEN -->
+<div class="auth-screen" id="authScreen">
+  <div class="auth-card">
+    <h1>🥫 Pantry Organizer</h1>
+    <p class="sub">Log in to see your household's shared pantry, recipes, and meal plan — synced across every device.</p>
+    <div class="scan-error" id="authError" style="display:none;"></div>
+    <label class="field">Email
+      <input type="email" id="authEmail" autocomplete="email">
+    </label>
+    <label class="field" style="margin-top:10px;">Password
+      <input type="password" id="authPassword" autocomplete="current-password">
+    </label>
+    <div class="row" style="margin-top:14px;">
+      <button class="btn-primary" type="button" id="loginBtn">Log in</button>
+      <button class="btn-secondary" type="button" id="signupBtn">Create account</button>
+    </div>
+    <p class="footnote">First time? Enter an email and password you'll remember and click "Create account." Anyone who signs up can see and edit the shared pantry, so only share this login with your household.</p>
+  </div>
+</div>
+
+<div class="wrap" id="appRoot" style="display:none;">
+
+  <header class="page-header">
+    <div>
+      <h1>🥫 Pantry Organizer</h1>
+      <p>Track your pantry, plan meals, and cut food waste — synced across your household's devices.</p>
+    </div>
+    <div style="text-align:right;">
+      <span class="save-status" id="saveStatus">Syncing…</span>
+      <div class="footnote" style="margin-top:6px;">
+        Logged in as <strong id="loggedInAs"></strong> ·
+        <button class="btn-secondary" type="button" id="logoutBtn" style="padding:3px 10px; font-size:0.75rem;">Log out</button>
+      </div>
+    </div>
+  </header>
+
+  <div class="card">
+    <div class="row" style="justify-content: space-between;">
+      <div class="row">
+        <label class="field">
+          Storage location
+          <select id="pantrySelect"></select>
+        </label>
+        <button class="btn-secondary" id="addPantryBtn" style="margin-top:20px;">+ Add location</button>
+        <button class="btn-danger" id="removePantryBtn" style="margin-top:20px;">Remove this location</button>
+      </div>
+    </div>
+    <div class="row" id="addPantryPanel" style="display:none; margin-top:12px;">
+      <label class="field">Choose a location
+        <select id="newPantryPreset">
+          <option value="">— pick one —</option>
+          <option>Pantry</option>
+          <option>Freezer</option>
+          <option>Refrigerator</option>
+          <option>Garage</option>
+          <option>Basement</option>
+          <option>Cellar</option>
+          <option value="__custom">Custom name…</option>
+        </select>
+      </label>
+      <label class="field" id="newPantryCustomWrap" style="display:none;">Custom name
+        <input type="text" id="newPantryCustomName" placeholder="e.g. Camper fridge">
+      </label>
+      <button class="btn-primary" type="button" id="confirmAddPantryBtn" style="margin-top:20px;">Add</button>
+      <button class="btn-secondary" type="button" id="cancelAddPantryBtn" style="margin-top:20px;">Cancel</button>
+    </div>
+  </div>
+
+  <div class="tabs">
+    <button class="tab-btn active" data-tab="inventory">Inventory</button>
+    <button class="tab-btn" data-tab="quick">Quick count</button>
+    <button class="tab-btn" data-tab="recipes">Recipes</button>
+    <button class="tab-btn" data-tab="mealplan">Meal plan</button>
+    <button class="tab-btn" data-tab="shopping">Shopping list</button>
+  </div>
+
+  <!-- INVENTORY TAB -->
+  <section id="tab-inventory">
+    <div class="card">
+      <h2>Add an item</h2>
+      <p class="sub">Log what you have, how much, and when it expires (expiration date is optional).</p>
+      <div class="row">
+        <label class="field">Item name
+          <input type="text" id="itemName" placeholder="e.g. Black beans">
+        </label>
+        <input type="hidden" id="itemBarcode" value="">
+        <button class="btn-secondary" type="button" id="scanBtn" style="margin-top:20px;">📷 Scan barcode</button>
+        <label class="field">Aisle / category
+          <select id="itemCategory">
+            <option>Produce</option>
+            <option>Grains &amp; Pasta</option>
+            <option>Canned &amp; Jarred</option>
+            <option>Baking</option>
+            <option>Spices &amp; Condiments</option>
+            <option>Snacks</option>
+            <option>Frozen</option>
+            <option>Dairy &amp; Eggs</option>
+            <option>Meat &amp; Seafood</option>
+            <option>Beverages</option>
+            <option>Cleaning &amp; Household</option>
+            <option>Other</option>
+          </select>
+        </label>
+        <label class="field">Quantity
+          <input type="number" id="itemQty" min="0" step="1" value="1" style="width:80px;">
+        </label>
+        <label class="field">Unit
+          <input type="text" id="itemUnit" placeholder="cans, lbs, boxes" style="width:110px;">
+        </label>
+        <label class="field">Low-stock at
+          <input type="number" id="itemThreshold" min="0" step="1" value="1" style="width:90px;">
+        </label>
+        <label class="field">Expires
+          <input type="date" id="itemExpiry">
+        </label>
+        <button class="btn-primary" id="addItemBtn" style="margin-top:20px;">Add item</button>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="row" style="justify-content: space-between;">
+        <h2 style="margin:0;">Current inventory</h2>
+        <input type="text" class="search-input" id="searchInput" placeholder="Search items...">
+      </div>
+      <p class="sub">Items expiring within 7 days or at/below their low-stock number are flagged.</p>
+      <div id="inventoryTableWrap"></div>
+    </div>
+  </section>
+
+  <!-- BARCODE SCAN MODAL -->
+  <div class="scan-modal" id="scanModal" style="display:none;">
+    <div class="scan-modal-inner">
+      <div class="row" style="justify-content: space-between;">
+        <h2 style="margin:0;">Scan a barcode</h2>
+        <button class="btn-secondary" type="button" id="closeScanBtn">Close</button>
+      </div>
+      <p class="sub" id="scanStatusMsg">Point your camera at a barcode. Already have it in stock? Scanning it just adds one to the count.</p>
+      <div id="qrReader"></div>
+    </div>
+  </div>
+
+  <!-- QUICK COUNT TAB -->
+  <section id="tab-quick" style="display:none;">
+    <div class="card">
+      <h2>Quick count</h2>
+      <p class="sub">Doing a fast walk-through of the pantry? Tap + / − to update quantities without opening the full form.</p>
+      <div class="quick-grid" id="quickGrid"></div>
+      <p class="empty-note" id="quickEmptyNote" style="display:none;">Add items in the Inventory tab first, then they'll show up here for quick counting.</p>
+    </div>
+  </section>
+
+  <!-- RECIPES TAB -->
+  <section id="tab-recipes" style="display:none;">
+    <div class="card">
+      <h2>Add a recipe</h2>
+      <p class="sub">List the ingredients so this recipe can be used in your weekly meal plan and auto-added to your shopping list when needed.</p>
+      <div class="row">
+        <label class="field">Recipe name
+          <input type="text" id="recipeName" placeholder="e.g. Chili" style="width:220px;">
+        </label>
+        <label class="field">Servings
+          <input type="number" id="recipeServings" min="1" step="1" value="4" style="width:80px;">
+        </label>
+      </div>
+
+      <div style="margin-top:14px;">
+        <label class="field" style="margin-bottom:6px;">Ingredients</label>
+        <p class="sub" style="margin-top:-2px;">Start typing to pick from items already in your pantry — the unit and aisle fill in automatically. You can still type something new if it's not in your inventory yet.</p>
+        <div id="recipeIngredientRows"></div>
+        <datalist id="pantryItemNames"></datalist>
+        <button class="btn-secondary" id="addIngredientRowBtn" type="button">+ Add ingredient</button>
+      </div>
+
+      <div style="margin-top:14px;">
+        <label class="field">Notes (optional)
+          <textarea id="recipeNotes" rows="2" placeholder="Prep notes, cook time, etc."></textarea>
+        </label>
+      </div>
+
+      <button class="btn-primary" id="saveRecipeBtn" style="margin-top:14px;">Save recipe</button>
+    </div>
+
+    <div class="card">
+      <h2>Your recipes</h2>
+      <div id="recipeListWrap"></div>
+    </div>
+  </section>
+
+  <!-- MEAL PLAN TAB -->
+  <section id="tab-mealplan" style="display:none;">
+    <div class="card">
+      <div class="week-nav">
+        <button class="btn-secondary" id="prevWeekBtn">← Previous week</button>
+        <span class="week-label" id="weekLabel"></span>
+        <button class="btn-secondary" id="nextWeekBtn">Next week →</button>
+      </div>
+      <div id="mealGridWrap"></div>
+      <p class="footnote">Assign a recipe to any meal slot. When you're ready, generate a shopping list for everything this week's meals need that you don't already have enough of.</p>
+      <button class="btn-primary" id="generateShopBtn" style="margin-top:10px;">Generate shopping list for this week</button>
+    </div>
+  </section>
+
+  <!-- SHOPPING LIST TAB -->
+  <section id="tab-shopping" style="display:none;">
+    <div class="card">
+      <h2>Shopping list</h2>
+      <p class="sub">Grouped by aisle. Built from low-stock pantry items, ingredients your planned meals still need, and anything you add by hand.</p>
+      <div class="row">
+        <label class="field">Add an extra item
+          <input type="text" id="extraShopItem" placeholder="e.g. paper towels">
+        </label>
+        <button class="btn-secondary" id="addExtraShopBtn" style="margin-top:20px;">Add to list</button>
+        <button class="btn-secondary" id="copyListBtn" style="margin-top:20px;">Copy list</button>
+        <button class="btn-secondary" id="printListBtn" style="margin-top:20px;">Print list</button>
+        <button class="btn-secondary" id="clearCheckedBtn" style="margin-top:20px;">Clear checked</button>
+      </div>
+      <div id="shoppingListWrap" style="margin-top: 14px;"></div>
+    </div>
+  </section>
+
+  <div id="printArea" class="print-only"></div>
+
+  <div class="card">
+    <h2>Backup your data</h2>
+    <p class="sub">Everything above syncs automatically to your household's shared account, so you don't need to click Save. These buttons are for an extra offline backup file, or to start completely fresh.</p>
+    <div class="row">
+      <button class="btn-secondary" id="exportBtn">Export backup file</button>
+      <button class="btn-secondary" id="importBtn">Import backup file</button>
+      <input type="file" id="importFileInput" accept=".json" style="display:none;">
+      <button class="btn-danger" id="resetAllBtn">Reset all data</button>
+    </div>
+  </div>
+
+  <p class="footnote">Low-stock and "expiring soon" thresholds are just a starting point — adjust the numbers on each item to fit how you actually shop. Shopping-list quantities from meal plans are estimates: ingredients are matched by name across your storage locations.</p>
+</div>
+
+<script src="app.js"></script>
+</body>
+</html>
