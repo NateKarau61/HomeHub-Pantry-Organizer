@@ -15,10 +15,10 @@
 // or write your data, not this config.
 
 const firebaseConfig = {
-  apiKey: "PASTE_YOUR_API_KEY_HERE",
-  authDomain: "PASTE_YOUR_AUTH_DOMAIN_HERE",
-  projectId: "PASTE_YOUR_PROJECT_ID_HERE",
-  storageBucket: "PASTE_YOUR_STORAGE_BUCKET_HERE",
-  messagingSenderId: "PASTE_YOUR_SENDER_ID_HERE",
-  appId: "PASTE_YOUR_APP_ID_HERE"
+  apiKey: "AIzaSyAMtt8Fumqrl79Njk5A6rRj4DG8uZRWxrM",
+  authDomain: "pantry-organizer-1f3ce.firebaseapp.com",
+  projectId: "pantry-organizer-1f3ce",
+  storageBucket: "pantry-organizer-1f3ce.firebasestorage.app",
+  messagingSenderId: "347202799549",
+  appId: "1:347202799549:web:3a758ca1af34ddac2534d4"
 };
