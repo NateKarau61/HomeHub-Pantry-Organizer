@@ -5,6 +5,9 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Pantry Organizer — Track Your Pantry, Plan Meals, Cut Food Waste</title>
 <meta name="description" content="A free, private pantry tracker and meal planner. Log ingredients, get expiry alerts, plan weekly meals, and auto-generate a shopping list grouped by aisle. Nothing is uploaded — your data stays in your browser.">
+<link rel="manifest" href="manifest.json">
+<meta name="theme-color" content="#5B7B63">
+<link rel="apple-touch-icon" href="icon-192.png">
 <link rel="stylesheet" href="styles.css">
 <script src="https://unpkg.com/html5-qrcode@2.3.8/html5-qrcode.min.js"></script>
 <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js"></script>
@@ -88,6 +91,8 @@
     <button class="tab-btn" data-tab="recipes">Recipes</button>
     <button class="tab-btn" data-tab="mealplan">Meal plan</button>
     <button class="tab-btn" data-tab="shopping">Shopping list</button>
+    <button class="tab-btn" data-tab="spending">Spending</button>
+    <button class="tab-btn" data-tab="activity">Activity</button>
   </div>
 
   <!-- INVENTORY TAB -->
@@ -129,8 +134,21 @@
         <label class="field">Expires
           <input type="date" id="itemExpiry">
         </label>
+        <label class="field">Price paid (optional)
+          <input type="number" id="itemPrice" min="0" step="0.01" placeholder="0.00" style="width:100px;">
+        </label>
         <button class="btn-primary" id="addItemBtn" style="margin-top:20px;">Add item</button>
       </div>
+      <div class="row" style="margin-top:10px;">
+        <label class="field" style="flex-direction:row; align-items:center; gap:6px;">
+          <input type="checkbox" id="itemStaple" style="width:auto;">
+          Keep this stocked (staple)
+        </label>
+        <label class="field">Remind every (days)
+          <input type="number" id="itemRestockDays" min="1" step="1" placeholder="14" style="width:90px;">
+        </label>
+      </div>
+      <p class="footnote">Mark a staple and it'll show up on your shopping list as a restock reminder on that schedule, even if it's not technically low — good for things like paper towels or coffee that you buy on a rhythm rather than by count.</p>
     </div>
 
     <div class="card">
@@ -167,6 +185,12 @@
 
   <!-- RECIPES TAB -->
   <section id="tab-recipes" style="display:none;">
+    <div class="card">
+      <h2>You can make right now</h2>
+      <p class="sub">Recipes where you already have every ingredient on hand.</p>
+      <div id="cookNowWrap"></div>
+    </div>
+
     <div class="card">
       <h2>Add a recipe</h2>
       <p class="sub">List the ingredients so this recipe can be used in your weekly meal plan and auto-added to your shopping list when needed.</p>
@@ -236,6 +260,37 @@
 
   <div id="printArea" class="print-only"></div>
 
+  <!-- SPENDING TAB -->
+  <section id="tab-spending" style="display:none;">
+    <div class="card">
+      <h2>Grocery spending</h2>
+      <p class="sub">Log what you spend on grocery trips to see a running estimate of your monthly total.</p>
+      <div class="row">
+        <label class="field">Amount
+          <input type="number" id="costAmount" min="0" step="0.01" placeholder="0.00" style="width:110px;">
+        </label>
+        <label class="field">Date
+          <input type="date" id="costDate">
+        </label>
+        <label class="field">Note (optional)
+          <input type="text" id="costNote" placeholder="e.g. Costco run">
+        </label>
+        <button class="btn-primary" id="addCostBtn" style="margin-top:20px;">Log spending</button>
+      </div>
+      <div class="row" id="spendingStats" style="margin-top:14px;"></div>
+      <div id="spendingListWrap" style="margin-top:14px;"></div>
+    </div>
+  </section>
+
+  <!-- ACTIVITY LOG TAB -->
+  <section id="tab-activity" style="display:none;">
+    <div class="card">
+      <h2>Household activity</h2>
+      <p class="sub">Who added, removed, or changed what — so everyone sharing this pantry can stay in sync.</p>
+      <div id="activityLogWrap"></div>
+    </div>
+  </section>
+
   <div class="card">
     <h2>Backup your data</h2>
     <p class="sub">Everything above syncs automatically to your household's shared account, so you don't need to click Save. These buttons are for an extra offline backup file, or to start completely fresh.</p>
@@ -250,6 +305,22 @@
   <p class="footnote">Low-stock and "expiring soon" thresholds are just a starting point — adjust the numbers on each item to fit how you actually shop. Shopping-list quantities from meal plans are estimates: ingredients are matched by name across your storage locations.</p>
 </div>
 
+<!-- UNDO TOAST -->
+<div class="undo-toast" id="undoToast" style="display:none;">
+  <span id="undoToastMsg"></span>
+  <button class="btn-secondary" type="button" id="undoToastBtn">Undo</button>
+  <button class="btn-icon" type="button" id="undoToastDismissBtn">✕</button>
+</div>
+
 <script src="app.js"></script>
+<script>
+  if ("serviceWorker" in navigator) {
+    window.addEventListener("load", () => {
+      navigator.serviceWorker.register("service-worker.js").catch(() => {
+        // Harmless if this fails (e.g. opened as a local file, or offline) — the app works fine without it.
+      });
+    });
+  }
+</script>
 </body>
 </html>

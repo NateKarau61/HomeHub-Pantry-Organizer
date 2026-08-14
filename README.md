@@ -15,6 +15,13 @@ A free pantry tracker and meal planner — inspired by [PantryTrack](https://pan
 - **Printable shopping list** — click "Print list" for a clean, checkbox-style, aisle-grouped page you can print or save as a PDF to take to the store.
 - **Automatic cloud sync** — everything saves to your household's shared account via Firebase, with no manual save button. Export a backup `.json` file any time as an extra safety net, or import one to restore.
 - **Barcode scanning** — tap "Scan barcode" on the Inventory tab to use your camera (phone or laptop) to scan a product. If it's already in your pantry, scanning it just adds one to the count. If it's new, the app looks it up via the free [Open Food Facts](https://world.openfoodfacts.org/) database and pre-fills the name and aisle for you. Works great on a phone — no app to install, just open the site in your browser.
+- **Mark a meal cooked** — once a recipe is assigned to a meal-plan slot, a "✓ Cooked" button appears. Clicking it subtracts that recipe's ingredients from your pantry automatically, so your counts stay accurate without manually adjusting each item after you cook.
+- **"You can make right now"** — the Recipes tab shows which of your saved recipes you already have every ingredient for, so you can find something to cook without checking the shelves first.
+- **Recurring staples** — flag any item as a staple with a restock reminder interval (e.g. every 14 days). It'll show up on your shopping list as a "restock reminder" on that schedule even if it's not technically low — good for things like paper towels or coffee that you buy on a rhythm rather than by count.
+- **Grocery spending tracker** — log what you spend on grocery trips (amount, date, optional note) on the new Spending tab, and see your last-30-days total and monthly average. Logging a price when you add an inventory item creates an entry automatically too.
+- **Household activity log** — the Activity tab shows a running feed of who added, removed, or changed what and when, so everyone sharing the pantry can stay in sync.
+- **Undo on delete** — removing a pantry item or deleting a recipe shows a brief "Undo" toast, so an accidental delete isn't permanent.
+- **Installable, works offline** — the site can be added to your phone's home screen like an app (look for "Add to Home Screen" in your browser's share/menu options), and a service worker caches the app so it still opens without a signal.
 
 ## Running it locally
 
@@ -22,7 +29,7 @@ Open `index.html` in any browser — there's no build step and no dependencies. 
 
 ## Publishing with GitHub Pages
 
-1. Create a new repository on GitHub (e.g. `Pantry-Organizer`) and upload `index.html`, `styles.css`, `app.js`, `firebase-config.js`, and this `README.md`.
+1. Create a new repository on GitHub (e.g. `Pantry-Organizer`) and upload `index.html`, `styles.css`, `app.js`, `firebase-config.js`, `manifest.json`, `service-worker.js`, `icon-192.png`, `icon-512.png`, and this `README.md`.
 2. In the repo, go to **Settings → Pages**.
 3. Under **Build and deployment → Source**, choose **Deploy from a branch**.
 4. Pick the `main` branch and the `/ (root)` folder, then click **Save**.
@@ -60,4 +67,12 @@ Camera access only works over a secure connection — that means your GitHub Pag
 
 ## Notes on the shopping-list math
 
-Ingredient matching between recipes and your inventory is done by name (case-insensitive), not a barcode or database — so "Ground beef" in a recipe will match "Ground beef" in your pantry, but won't automatically match "80/20 ground beef" unless you name them the same way. Quantities are summed across all your storage locations regardless of unit, so keep units consistent for an item (e.g. always track ground beef in lb) for the numbers to mean much.
+Ingredient matching between recipes and your inventory is done by name (case-insensitive), not a barcode or database — so "Ground beef" in a recipe will match "Ground beef" in your pantry, but won't automatically match "80/20 ground beef" unless you name them the same way. Quantities are summed across all your storage locations regardless of unit, so keep units consistent for an item (e.g. always track ground beef in lb) for the numbers to mean much. "Mark cooked" uses the same name-matching logic to subtract ingredients from whichever storage location(s) have them.
+
+## Notes on recurring staples
+
+A staple's restock reminder is based on the date it was last restocked, not a fixed calendar date. Adding a new item as a staple, using the +/− buttons to increase its count, scanning a barcode match, or clicking "Mark restocked" on the shopping list all reset that date. If you toggle the ★ on an item that's never been restocked, it's treated as due right away — restock it once and the schedule takes over from there.
+
+## Notes on offline / installable support
+
+The service worker only caches this site's own files (HTML, CSS, JS, icons) — it never caches Firebase, the barcode lookup, or the scanner library, so login, sync, and barcode lookups always need a live connection. Offline mode just means the app itself still opens and shows whatever was last loaded. If you update these files later, close and reopen the site (or wait a moment) for the new version to take over — the service worker checks for updates in the background.

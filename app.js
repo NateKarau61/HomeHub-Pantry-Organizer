@@ -14,13 +14,15 @@
 
   function defaultState() {
     return {
-      version: 2,
+      version: 3,
       pantries: { "Main Pantry": { items: [] } },
       currentPantry: "Main Pantry",
       recipes: [],
       mealPlan: {},
       shoppingExtras: [],
-      shoppingAutoChecked: {}
+      shoppingAutoChecked: {},
+      costLog: [],
+      activityLog: []
     };
   }
 
@@ -31,7 +33,9 @@
       recipes: (raw && raw.recipes) || [],
       mealPlan: (raw && raw.mealPlan) || {},
       shoppingExtras: (raw && raw.shoppingExtras) || [],
-      shoppingAutoChecked: (raw && raw.shoppingAutoChecked) || {}
+      shoppingAutoChecked: (raw && raw.shoppingAutoChecked) || {},
+      costLog: (raw && raw.costLog) || [],
+      activityLog: (raw && raw.activityLog) || []
     });
   }
 
@@ -164,6 +168,74 @@
     });
   }
 
+  // ---------------- Activity log ----------------
+  function currentUserLabel() {
+    return (fbAuth && fbAuth.currentUser && fbAuth.currentUser.email) || "Someone";
+  }
+
+  function logActivity(action, detail) {
+    state.activityLog = state.activityLog || [];
+    state.activityLog.unshift({ id: uid(), ts: Date.now(), user: currentUserLabel(), action, detail });
+    if (state.activityLog.length > 200) state.activityLog.length = 200;
+  }
+
+  function timeAgo(ts) {
+    const diff = Math.max(0, Date.now() - ts);
+    const mins = Math.round(diff / 60000);
+    if (mins < 1) return "just now";
+    if (mins < 60) return mins + "m ago";
+    const hours = Math.round(mins / 60);
+    if (hours < 24) return hours + "h ago";
+    const days = Math.round(hours / 24);
+    if (days < 30) return days + "d ago";
+    return new Date(ts).toLocaleDateString();
+  }
+
+  function renderActivityLog() {
+    const wrap = document.getElementById("activityLogWrap");
+    if (!wrap) return;
+    const log = state.activityLog || [];
+    if (log.length === 0) {
+      wrap.innerHTML = '<p class="empty-note">No activity yet. Actions like adding items, saving recipes, and marking meals cooked will show up here.</p>';
+      return;
+    }
+    wrap.innerHTML = log.map(entry => `
+      <div class="shopping-item">
+        <span class="label">${escapeHtml(entry.detail)}</span>
+        <span class="pill" style="margin-left:auto;">${escapeHtml(entry.user)}</span>
+        <span class="footnote" style="margin:0; white-space:nowrap;">${timeAgo(entry.ts)}</span>
+      </div>
+    `).join("");
+  }
+
+  // ---------------- Undo toast ----------------
+  let pendingUndo = null;
+  let undoTimer = null;
+
+  function showUndoToast(message, restoreFn) {
+    const toast = document.getElementById("undoToast");
+    if (!toast) { return; }
+    clearTimeout(undoTimer);
+    document.getElementById("undoToastMsg").textContent = message;
+    toast.style.display = "flex";
+    pendingUndo = restoreFn;
+    undoTimer = setTimeout(() => {
+      toast.style.display = "none";
+      pendingUndo = null;
+    }, 6000);
+  }
+
+  function undoLastDelete() {
+    clearTimeout(undoTimer);
+    const toast = document.getElementById("undoToast");
+    if (toast) toast.style.display = "none";
+    if (pendingUndo) {
+      const fn = pendingUndo;
+      pendingUndo = null;
+      fn();
+    }
+  }
+
   function currentPantryData() {
     if (!state.pantries[state.currentPantry]) {
       const first = Object.keys(state.pantries)[0];
@@ -254,19 +326,33 @@
   });
 
   // ---------------- Tabs ----------------
+  const TAB_NAMES = ["inventory", "quick", "recipes", "mealplan", "shopping", "spending", "activity"];
   document.querySelectorAll(".tab-btn").forEach(btn => {
     btn.addEventListener("click", () => {
       document.querySelectorAll(".tab-btn").forEach(b => b.classList.remove("active"));
       btn.classList.add("active");
       const tab = btn.dataset.tab;
-      ["inventory", "quick", "recipes", "mealplan", "shopping"].forEach(t => {
-        document.getElementById("tab-" + t).style.display = t === tab ? "" : "none";
+      TAB_NAMES.forEach(t => {
+        const el = document.getElementById("tab-" + t);
+        if (el) el.style.display = t === tab ? "" : "none";
       });
       if (tab === "quick") renderQuickCount();
-      if (tab === "recipes") renderRecipeList();
+      if (tab === "recipes") { renderRecipeList(); renderCookNow(); }
       if (tab === "mealplan") renderMealPlan();
       if (tab === "shopping") renderShoppingList();
+      if (tab === "spending") renderSpending();
+      if (tab === "activity") renderActivityLog();
     });
+  });
+
+  const undoToastBtn = document.getElementById("undoToastBtn");
+  if (undoToastBtn) undoToastBtn.addEventListener("click", undoLastDelete);
+  const undoToastDismissBtn = document.getElementById("undoToastDismissBtn");
+  if (undoToastDismissBtn) undoToastDismissBtn.addEventListener("click", () => {
+    clearTimeout(undoTimer);
+    const toast = document.getElementById("undoToast");
+    if (toast) toast.style.display = "none";
+    pendingUndo = null;
   });
 
   // ---------------- Inventory ----------------
@@ -287,8 +373,26 @@
     const threshold = parseFloat(document.getElementById("itemThreshold").value) || 0;
     const expiry = document.getElementById("itemExpiry").value;
     const barcode = document.getElementById("itemBarcode").value.trim() || null;
+    const stapleEl = document.getElementById("itemStaple");
+    const staple = !!(stapleEl && stapleEl.checked);
+    const restockDaysEl = document.getElementById("itemRestockDays");
+    const restockDays = staple ? (parseFloat(restockDaysEl && restockDaysEl.value) || 14) : null;
+    const priceEl = document.getElementById("itemPrice");
+    const price = priceEl && priceEl.value ? parseFloat(priceEl.value) : null;
 
-    currentPantryData().items.push({ id: uid(), name, category, qty, unit, threshold, expiry, barcode });
+    const newItem = {
+      id: uid(), name, category, qty, unit, threshold, expiry, barcode,
+      staple, restockDays,
+      lastRestocked: staple ? new Date().toISOString().slice(0, 10) : null,
+      price: (price != null && !isNaN(price)) ? price : null
+    };
+    currentPantryData().items.push(newItem);
+
+    if (price != null && !isNaN(price) && price > 0) {
+      state.costLog.push({ id: uid(), date: new Date().toISOString().slice(0, 10), amount: price, note: name });
+    }
+
+    logActivity("add", `Added "${name}"${qty ? " ×" + qty : ""} to ${escapeHtml(state.currentPantry)}`);
 
     document.getElementById("itemName").value = "";
     document.getElementById("itemQty").value = "1";
@@ -296,6 +400,9 @@
     document.getElementById("itemThreshold").value = "1";
     document.getElementById("itemExpiry").value = "";
     document.getElementById("itemBarcode").value = "";
+    if (stapleEl) stapleEl.checked = false;
+    if (restockDaysEl) restockDaysEl.value = "";
+    if (priceEl) priceEl.value = "";
 
     saveState();
     renderAll();
@@ -304,9 +411,23 @@
 
   function removeItem(id) {
     const data = currentPantryData();
-    data.items = data.items.filter(i => i.id !== id);
+    const idx = data.items.findIndex(i => i.id === id);
+    if (idx === -1) return;
+    const removed = data.items[idx];
+    const locationName = state.currentPantry;
+    data.items.splice(idx, 1);
+    logActivity("remove", `Removed "${removed.name}" from ${escapeHtml(locationName)}`);
     saveState();
     renderAll();
+    showUndoToast(`Removed "${removed.name}".`, () => {
+      const pantry = state.pantries[locationName];
+      if (pantry) {
+        pantry.items.splice(Math.min(idx, pantry.items.length), 0, removed);
+        logActivity("undo", `Restored "${removed.name}" to ${escapeHtml(locationName)}`);
+        saveState();
+        renderAll();
+      }
+    });
   }
 
   function adjustQty(id, delta) {
@@ -314,8 +435,31 @@
     const item = data.items.find(i => i.id === id);
     if (!item) return;
     item.qty = Math.max(0, (parseFloat(item.qty) || 0) + delta);
+    if (delta > 0 && item.staple) item.lastRestocked = new Date().toISOString().slice(0, 10);
     saveState();
     renderAll();
+  }
+
+  function toggleStaple(id) {
+    const data = currentPantryData();
+    const item = data.items.find(i => i.id === id);
+    if (!item) return;
+    item.staple = !item.staple;
+    if (item.staple) {
+      if (!item.restockDays) item.restockDays = 14;
+      if (!item.lastRestocked) item.lastRestocked = new Date().toISOString().slice(0, 10);
+    }
+    saveState();
+    renderAll();
+  }
+
+  function markRestocked(id) {
+    const data = currentPantryData();
+    const item = data.items.find(i => i.id === id);
+    if (!item) return;
+    item.lastRestocked = new Date().toISOString().slice(0, 10);
+    saveState();
+    renderShoppingList();
   }
 
   function renderInventory() {
@@ -355,13 +499,14 @@
         }
 
         html += `<tr class="${rowClasses.join(" ")}">
-          <td data-label="Item">${escapeHtml(item.name)}</td>
+          <td data-label="Item">${escapeHtml(item.name)}${item.staple ? ' <span class="pill amber" title="Staple — restocks every ' + (item.restockDays || 14) + ' days">★ staple</span>' : ""}</td>
           <td data-label="Qty" class="qty-cell">${item.qty}${isLow ? ' <span class="pill warn">low</span>' : ""}</td>
           <td data-label="Unit">${escapeHtml(item.unit || "—")}</td>
           <td data-label="Expires" class="exp-cell">${expText}</td>
           <td data-label="">
             <button class="btn-icon" onclick="pantryApp.adjustQty('${item.id}', -1)">−</button>
             <button class="btn-icon" onclick="pantryApp.adjustQty('${item.id}', 1)">+</button>
+            <button class="btn-icon" title="Toggle staple / recurring restock reminder" onclick="pantryApp.toggleStaple('${item.id}')">${item.staple ? "★" : "☆"}</button>
             <button class="btn-danger" onclick="pantryApp.removeItem('${item.id}')">Remove</button>
           </td>
         </tr>`;
@@ -492,14 +637,17 @@
     if (editingRecipeId) {
       const r = state.recipes.find(r => r.id === editingRecipeId);
       if (r) { r.name = name; r.servings = servings; r.notes = notes; r.ingredients = ingredients; }
+      logActivity("edit-recipe", `Updated recipe "${name}"`);
     } else {
       state.recipes.push({ id: uid(), name, servings, notes, ingredients });
+      logActivity("add-recipe", `Added recipe "${name}"`);
     }
 
     saveState();
     resetRecipeForm();
     renderRecipeList();
     renderMealPlan();
+    renderCookNow();
   }
   document.getElementById("saveRecipeBtn").addEventListener("click", saveRecipe);
 
@@ -519,15 +667,35 @@
 
   function deleteRecipe(id) {
     if (!confirm("Delete this recipe? It will also be cleared from any meal plan slots using it.")) return;
-    state.recipes = state.recipes.filter(r => r.id !== id);
+    const idx = state.recipes.findIndex(r => r.id === id);
+    if (idx === -1) return;
+    const removed = state.recipes[idx];
+    const clearedSlots = [];
     Object.keys(state.mealPlan).forEach(dateKey => {
       MEAL_SLOTS.forEach(slot => {
-        if (state.mealPlan[dateKey][slot] === id) state.mealPlan[dateKey][slot] = null;
+        if (state.mealPlan[dateKey][slot] === id) {
+          clearedSlots.push({ dateKey, slot });
+          state.mealPlan[dateKey][slot] = null;
+        }
       });
     });
+    state.recipes.splice(idx, 1);
+    logActivity("delete-recipe", `Deleted recipe "${removed.name}"`);
     saveState();
     renderRecipeList();
     renderMealPlan();
+    renderCookNow();
+    showUndoToast(`Deleted recipe "${removed.name}".`, () => {
+      state.recipes.splice(Math.min(idx, state.recipes.length), 0, removed);
+      clearedSlots.forEach(({ dateKey, slot }) => {
+        ensureMealSlot(dateKey)[slot] = removed.id;
+      });
+      logActivity("undo", `Restored recipe "${removed.name}"`);
+      saveState();
+      renderRecipeList();
+      renderMealPlan();
+      renderCookNow();
+    });
   }
 
   function renderRecipeList() {
@@ -552,6 +720,39 @@
         </div>
       </div>
     `).join("");
+  }
+
+  // ---------------- What can I make right now ----------------
+  function haveMap() {
+    const have = {};
+    allItemsAcrossLocations().forEach(item => {
+      const k = normName(item.name);
+      have[k] = (have[k] || 0) + (parseFloat(item.qty) || 0);
+    });
+    return have;
+  }
+
+  function canMakeRecipe(recipe, have) {
+    return recipe.ingredients.every(ing => {
+      if (!ing.qty) return (have[normName(ing.name)] || 0) > 0;
+      return (have[normName(ing.name)] || 0) >= ing.qty - 0.0001;
+    });
+  }
+
+  function renderCookNow() {
+    const wrap = document.getElementById("cookNowWrap");
+    if (!wrap) return;
+    if (state.recipes.length === 0) {
+      wrap.innerHTML = '<p class="empty-note">Add some recipes below, and the ones you already have everything for will show up here.</p>';
+      return;
+    }
+    const have = haveMap();
+    const makeable = state.recipes.filter(r => r.ingredients.length && canMakeRecipe(r, have));
+    if (makeable.length === 0) {
+      wrap.innerHTML = '<p class="empty-note">Nothing yet — recipes will show up here once you have every ingredient on hand.</p>';
+      return;
+    }
+    wrap.innerHTML = makeable.map(r => `<span class="pill amber" style="margin:3px 6px 3px 0; font-size:0.85rem; padding:5px 12px;">🍳 ${escapeHtml(r.name)}</span>`).join("");
   }
 
   // ---------------- Meal plan ----------------
@@ -611,7 +812,9 @@
         html += `<td data-label="${MEAL_SLOT_LABELS[s]}"><select onchange="pantryApp.setMeal('${key}','${s}', this.value)">
           <option value="">—</option>
           ${state.recipes.map(r => `<option value="${r.id}" ${slot[s] === r.id ? "selected" : ""}>${escapeHtml(r.name)}</option>`).join("")}
-        </select></td>`;
+        </select>
+        ${slot[s] ? `<button class="btn-icon" style="margin-top:4px; font-size:0.75rem;" onclick="pantryApp.markRecipeCooked('${key}','${s}')">✓ Cooked</button>` : ""}
+        </td>`;
       });
       html += "</tr>";
     });
@@ -628,6 +831,37 @@
     const s = ensureMealSlot(dateKey);
     s[slot] = recipeId || null;
     saveState();
+    renderMealPlan();
+  }
+
+  function markRecipeCooked(dateKey, slot) {
+    const mealSlot = state.mealPlan[dateKey];
+    const recipeId = mealSlot && mealSlot[slot];
+    if (!recipeId) return;
+    const recipe = state.recipes.find(r => r.id === recipeId);
+    if (!recipe) return;
+    if (!confirm(`Mark "${recipe.name}" as cooked? This will subtract its ingredients from your pantry inventory.`)) return;
+
+    recipe.ingredients.forEach(ing => {
+      let remaining = ing.qty || 0;
+      if (remaining <= 0) return;
+      Object.keys(state.pantries).forEach(loc => {
+        if (remaining <= 0) return;
+        state.pantries[loc].items.forEach(item => {
+          if (remaining <= 0) return;
+          if (normName(item.name) !== normName(ing.name)) return;
+          const onHand = parseFloat(item.qty) || 0;
+          const take = Math.min(remaining, onHand);
+          item.qty = Math.max(0, onHand - take);
+          remaining -= take;
+        });
+      });
+    });
+
+    logActivity("cooked", `Marked "${recipe.name}" as cooked (${MEAL_SLOT_LABELS[slot]}, ${dateKey})`);
+    saveState();
+    renderAll();
+    alert(`Nice! Subtracted "${recipe.name}"'s ingredients from your pantry.`);
   }
 
   function generateShoppingListForWeek() {
@@ -679,6 +913,7 @@
       }
     });
 
+    logActivity("mealplan-shop", `Generated shopping list for the week of ${formatDateKey(days[0])} (${addedCount} item${addedCount === 1 ? "" : "s"})`);
     saveState();
     renderShoppingList();
 
@@ -703,12 +938,31 @@
     return out;
   }
 
+  // Staple items are due for a restock reminder once their configured interval has elapsed
+  // since they were last restocked — independent of whether they're technically "low stock."
+  function stapleDueItems() {
+    const out = [];
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+    Object.keys(state.pantries).forEach(loc => {
+      state.pantries[loc].items.forEach(item => {
+        if (!item.staple) return;
+        const days = parseFloat(item.restockDays) || 14;
+        const last = item.lastRestocked ? new Date(item.lastRestocked + "T00:00:00") : null;
+        const dueDate = last ? new Date(last.getTime() + days * 86400000) : today;
+        if (dueDate <= today) out.push({ location: loc, item });
+      });
+    });
+    return out;
+  }
+
   function renderShoppingList() {
     const wrap = document.getElementById("shoppingListWrap");
     const low = lowStockItems();
+    const staples = stapleDueItems().filter(({ item }) => !low.some(l => l.item.id === item.id));
     const extras = state.shoppingExtras || [];
 
-    if (low.length === 0 && extras.length === 0) {
+    if (low.length === 0 && staples.length === 0 && extras.length === 0) {
       wrap.innerHTML = '<p class="empty-note">Nothing needed right now. Low-stock pantry items and meal-plan needs will show up here automatically.</p>';
       return;
     }
@@ -727,6 +981,16 @@
           <input type="checkbox" ${checked ? "checked" : ""} onchange="pantryApp.toggleAutoChecked('${key}')">
           <span class="label">${escapeHtml(item.name)}${item.unit ? " (" + escapeHtml(item.unit) + ")" : ""}</span>
           <span class="pill warn">low stock · ${escapeHtml(location)}</span>
+        </div>
+      `);
+    });
+
+    staples.forEach(({ location, item }) => {
+      pushToGroup(item.category || "Other", `
+        <div class="shopping-item">
+          <span class="label">${escapeHtml(item.name)}${item.unit ? " (" + escapeHtml(item.unit) + ")" : ""}</span>
+          <span class="pill amber">restock reminder · ${escapeHtml(location)}</span>
+          <button class="btn-secondary" style="margin-left:auto;" onclick="pantryApp.markRestocked('${item.id}')">Mark restocked</button>
         </div>
       `);
     });
@@ -775,6 +1039,7 @@
     const label = input.value.trim();
     if (!label) return;
     state.shoppingExtras.push({ id: uid(), label, category: "Other", source: "manual", checked: false });
+    logActivity("add-shopping", `Added "${label}" to the shopping list`);
     input.value = "";
     saveState();
     renderShoppingList();
@@ -791,9 +1056,11 @@
 
   document.getElementById("copyListBtn").addEventListener("click", () => {
     const low = lowStockItems().filter(({ location, item }) => !state.shoppingAutoChecked["lowstock:" + location + ":" + item.id]);
+    const staples = stapleDueItems().filter(({ item }) => !low.some(l => l.item.id === item.id));
     const extras = (state.shoppingExtras || []).filter(e => !e.checked);
     const lines = [
       ...low.map(({ item }) => `- ${item.name}${item.unit ? " (" + item.unit + ")" : ""}`),
+      ...staples.map(({ item }) => `- ${item.name}${item.unit ? " (" + item.unit + ")" : ""} (staple restock)`),
       ...extras.map(e => `- ${e.label}${e.qty ? " — need " + e.qty : ""}`)
     ];
     if (lines.length === 0) { alert("Your shopping list is empty."); return; }
@@ -807,9 +1074,10 @@
 
   document.getElementById("printListBtn").addEventListener("click", () => {
     const low = lowStockItems().filter(({ location, item }) => !state.shoppingAutoChecked["lowstock:" + location + ":" + item.id]);
+    const staples = stapleDueItems().filter(({ item }) => !low.some(l => l.item.id === item.id));
     const extras = (state.shoppingExtras || []).filter(e => !e.checked);
 
-    if (low.length === 0 && extras.length === 0) {
+    if (low.length === 0 && staples.length === 0 && extras.length === 0) {
       alert("Your shopping list is empty — nothing to print.");
       return;
     }
@@ -821,6 +1089,9 @@
     }
     low.forEach(({ location, item }) => {
       pushToGroup(item.category || "Other", `${escapeHtml(item.name)}${item.unit ? " (" + escapeHtml(item.unit) + ")" : ""} — ${escapeHtml(location)}`);
+    });
+    staples.forEach(({ location, item }) => {
+      pushToGroup(item.category || "Other", `${escapeHtml(item.name)}${item.unit ? " (" + escapeHtml(item.unit) + ")" : ""} — restock reminder, ${escapeHtml(location)}`);
     });
     extras.forEach(ex => {
       pushToGroup(ex.category || "Other", `${escapeHtml(ex.label)}${ex.qty ? " — need " + escapeHtml(String(ex.qty)) : ""}`);
@@ -843,6 +1114,72 @@
 
     window.print();
   });
+
+  // ---------------- Spending / cost tracking ----------------
+  function addCostEntry() {
+    const amountEl = document.getElementById("costAmount");
+    const amount = parseFloat(amountEl.value);
+    if (!amount || amount <= 0) { alert("Enter an amount greater than 0."); return; }
+    const dateEl = document.getElementById("costDate");
+    const date = dateEl.value || new Date().toISOString().slice(0, 10);
+    const noteEl = document.getElementById("costNote");
+    const note = noteEl.value.trim();
+
+    state.costLog.push({ id: uid(), date, amount, note });
+    logActivity("spending", `Logged $${amount.toFixed(2)}${note ? " — " + note : ""}`);
+
+    amountEl.value = "";
+    noteEl.value = "";
+    dateEl.value = "";
+
+    saveState();
+    renderSpending();
+  }
+  const addCostBtn = document.getElementById("addCostBtn");
+  if (addCostBtn) addCostBtn.addEventListener("click", addCostEntry);
+
+  function removeCostEntry(id) {
+    state.costLog = (state.costLog || []).filter(c => c.id !== id);
+    saveState();
+    renderSpending();
+  }
+
+  function renderSpending() {
+    const wrap = document.getElementById("spendingListWrap");
+    const statsWrap = document.getElementById("spendingStats");
+    if (!wrap || !statsWrap) return;
+
+    const log = (state.costLog || []).slice().sort((a, b) => (b.date || "").localeCompare(a.date || ""));
+
+    const cutoff30 = Date.now() - 30 * 86400000;
+    const total30 = log
+      .filter(c => new Date(c.date + "T00:00:00").getTime() >= cutoff30)
+      .reduce((sum, c) => sum + (parseFloat(c.amount) || 0), 0);
+
+    let monthlyAvg = 0;
+    if (log.length) {
+      const months = new Set(log.map(c => (c.date || "").slice(0, 7)).filter(Boolean));
+      const totalAll = log.reduce((sum, c) => sum + (parseFloat(c.amount) || 0), 0);
+      monthlyAvg = totalAll / Math.max(1, months.size);
+    }
+
+    statsWrap.innerHTML = `
+      <span class="pill warn">Last 30 days: $${total30.toFixed(2)}</span>
+      <span class="pill amber">Monthly average: $${monthlyAvg.toFixed(2)}</span>
+    `;
+
+    if (log.length === 0) {
+      wrap.innerHTML = '<p class="empty-note">No spending logged yet. Add a grocery trip total above to start tracking.</p>';
+      return;
+    }
+
+    wrap.innerHTML = log.map(c => `
+      <div class="shopping-item">
+        <span class="label">${escapeHtml(c.date)} — $${(parseFloat(c.amount) || 0).toFixed(2)}${c.note ? " · " + escapeHtml(c.note) : ""}</span>
+        <button class="btn-danger" style="margin-left:auto;" onclick="pantryApp.removeCostEntry('${c.id}')">Remove</button>
+      </div>
+    `).join("");
+  }
 
   // ---------------- Backup / export / import / reset ----------------
   document.getElementById("exportBtn").addEventListener("click", () => {
@@ -1001,6 +1338,7 @@
     const existing = data.items.find(i => i.barcode === code);
     if (existing) {
       existing.qty = (parseFloat(existing.qty) || 0) + 1;
+      if (existing.staple) existing.lastRestocked = new Date().toISOString().slice(0, 10);
       saveState();
       renderAll();
       closeScanModal();
@@ -1039,9 +1377,15 @@
   document.getElementById("scanBtn").addEventListener("click", openScanModal);
   document.getElementById("closeScanBtn").addEventListener("click", closeScanModal);
 
-  // Test-only hook: lets automated tests exercise the scan pipeline without a real camera.
-  // Harmless in normal use — it's never called unless something explicitly invokes it.
-  window.__pantryTestHooks = { handleScannedBarcode, guessCategoryFromTags };
+  // Test-only hooks: let automated tests exercise things that are hard to trigger for real
+  // (a camera scan, the passage of time for a restock reminder, etc). Harmless in normal use —
+  // nothing here is ever called unless a test explicitly invokes it.
+  window.__pantryTestHooks = {
+    handleScannedBarcode, guessCategoryFromTags,
+    getState: () => state,
+    renderAll, renderShoppingList, renderSpending, renderActivityLog, renderCookNow,
+    stapleDueItems
+  };
 
   // ---------------- Full render ----------------
   function renderAll() {
@@ -1049,14 +1393,18 @@
     renderInventory();
     renderQuickCount();
     renderRecipeList();
+    renderCookNow();
     renderMealPlan();
     renderShoppingList();
     renderPantryItemNamesDatalist();
+    renderSpending();
+    renderActivityLog();
   }
 
   window.pantryApp = {
-    adjustQty, removeItem, editRecipe, deleteRecipe, setMeal,
-    toggleAutoChecked, toggleExtraChecked, removeExtra
+    adjustQty, removeItem, editRecipe, deleteRecipe, setMeal, markRecipeCooked,
+    toggleAutoChecked, toggleExtraChecked, removeExtra, toggleStaple, markRestocked,
+    removeCostEntry
   };
 
   startAuthFlow();
