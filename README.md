@@ -22,6 +22,7 @@ A free pantry tracker and meal planner — inspired by [PantryTrack](https://pan
 - **Household activity log** — the Activity tab shows a running feed of who added, removed, or changed what and when, so everyone sharing the pantry can stay in sync.
 - **Undo on delete** — removing a pantry item or deleting a recipe shows a brief "Undo" toast, so an accidental delete isn't permanent.
 - **Installable, works offline** — the site can be added to your phone's home screen like an app (look for "Add to Home Screen" in your browser's share/menu options), and a service worker caches the app so it still opens without a signal.
+- **Receipt scanning** — click "Scan receipt" on the Spending tab, take a photo of a grocery receipt (or upload one), and the app reads it with on-device OCR — no server, no upload. It picks out item/price lines and a total, then shows you an editable checklist so you can add the items you want to your inventory and/or log the total to your spending, all after you've reviewed and corrected anything it got wrong.
 
 ## Running it locally
 
@@ -76,3 +77,7 @@ A staple's restock reminder is based on the date it was last restocked, not a fi
 ## Notes on offline / installable support
 
 The service worker only caches this site's own files (HTML, CSS, JS, icons) — it never caches Firebase, the barcode lookup, or the scanner library, so login, sync, and barcode lookups always need a live connection. Offline mode just means the app itself still opens and shows whatever was last loaded. If you update these files later, close and reopen the site (or wait a moment) for the new version to take over — the service worker checks for updates in the background.
+
+## Notes on receipt scanning
+
+Receipts vary a lot store to store, so the reader is deliberately assisted rather than fully automatic: it always shows you an editable checklist of what it found before anything is added, so you can fix a misread name or price, uncheck a line, or skip it entirely if it's not usable. Items you add this way land in your current storage location with quantity 1 and aisle "Other" — recategorize or merge duplicates afterward in the Inventory tab if needed. The OCR engine ([Tesseract.js](https://tesseract.projectnaptha.com/)) downloads a language file the first time you use it (a few megabytes), so that first scan needs a decent connection and can take up to 30 seconds; it's faster after that. Like barcode scanning, using your camera directly requires a secure connection (your GitHub Pages link or `localhost`), though choosing an existing photo from your library works either way.

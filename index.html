@@ -10,6 +10,7 @@
 <link rel="apple-touch-icon" href="icon-192.png">
 <link rel="stylesheet" href="styles.css">
 <script src="https://unpkg.com/html5-qrcode@2.3.8/html5-qrcode.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js"></script>
 <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js"></script>
 <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-auth-compat.js"></script>
 <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore-compat.js"></script>
@@ -263,7 +264,10 @@
   <!-- SPENDING TAB -->
   <section id="tab-spending" style="display:none;">
     <div class="card">
-      <h2>Grocery spending</h2>
+      <div class="row" style="justify-content: space-between;">
+        <h2 style="margin:0;">Grocery spending</h2>
+        <button class="btn-secondary" type="button" id="scanReceiptBtn">🧾 Scan receipt</button>
+      </div>
       <p class="sub">Log what you spend on grocery trips to see a running estimate of your monthly total.</p>
       <div class="row">
         <label class="field">Amount
@@ -281,6 +285,19 @@
       <div id="spendingListWrap" style="margin-top:14px;"></div>
     </div>
   </section>
+
+  <!-- RECEIPT SCAN MODAL -->
+  <div class="scan-modal" id="receiptModal" style="display:none;">
+    <div class="scan-modal-inner" style="max-width:560px;">
+      <div class="row" style="justify-content: space-between;">
+        <h2 style="margin:0;">Scan a receipt</h2>
+        <button class="btn-secondary" type="button" id="closeReceiptBtn">Close</button>
+      </div>
+      <p class="sub" id="receiptStatusMsg">Take a photo of your receipt, or choose one from your library. This runs entirely in your browser — nothing is uploaded anywhere.</p>
+      <input type="file" id="receiptFileInput" accept="image/*" capture="environment">
+      <div id="receiptReviewWrap" style="margin-top:14px;"></div>
+    </div>
+  </div>
 
   <!-- ACTIVITY LOG TAB -->
   <section id="tab-activity" style="display:none;">

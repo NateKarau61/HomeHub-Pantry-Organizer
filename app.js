@@ -1377,14 +1377,189 @@
   document.getElementById("scanBtn").addEventListener("click", openScanModal);
   document.getElementById("closeScanBtn").addEventListener("click", closeScanModal);
 
+  // ---------------- Receipt scanning ----------------
+  // Reads a photographed/uploaded receipt entirely in the browser (via Tesseract.js OCR — no
+  // server involved) and picks out item/price lines and a total with a simple heuristic. Receipt
+  // formats vary too much to parse perfectly, so this always shows an editable review list —
+  // nothing gets added to your inventory or spending log without you checking it first.
+  function setReceiptStatus(msg, isError) {
+    const el = document.getElementById("receiptStatusMsg");
+    if (!el) return;
+    el.textContent = msg;
+    el.classList.toggle("scan-error", !!isError);
+  }
+
+  function openReceiptModal() {
+    document.getElementById("receiptModal").style.display = "flex";
+    document.getElementById("receiptReviewWrap").innerHTML = "";
+    document.getElementById("receiptFileInput").value = "";
+    setReceiptStatus("Take a photo of your receipt, or choose one from your library. This runs entirely in your browser — nothing is uploaded anywhere.", false);
+  }
+
+  function closeReceiptModal() {
+    document.getElementById("receiptModal").style.display = "none";
+  }
+
+  function titleCaseWords(s) {
+    return s.replace(/\s+/g, " ").trim().split(" ").map(w =>
+      w.length > 2 ? w[0].toUpperCase() + w.slice(1).toLowerCase() : w.toUpperCase()
+    ).join(" ");
+  }
+
+  // Looks for lines ending in a price (e.g. "GROUND BEEF 2LB   7.98"). Lines mentioning
+  // tax/subtotal/payment are skipped as non-purchasable; lines mentioning "total" are treated
+  // as candidates for the receipt's grand total instead of a line item.
+  function parseReceiptLines(text) {
+    const lines = (text || "").split(/\r?\n/).map(l => l.trim()).filter(Boolean);
+    // Allows an optional single trailing letter after the price (many US receipts append a
+    // tax-code flag like "F" for food-exempt or "T" for taxable, e.g. "BREAD  2.99 F").
+    const priceRe = /\$?\s*(\d{1,4}\.\d{2})\s*[A-Za-z]?\s*$/;
+    const totalKeywordRe = /\b(total|balance due|amount due|grand total)\b/i;
+    const skipKeywordRe = /\b(subtotal|sub total|tax|change|cash|credit|debit|visa|mastercard|amex|card|tender|discount|savings|coupon)\b/i;
+
+    const items = [];
+    let total = null;
+
+    lines.forEach(line => {
+      const m = line.match(priceRe);
+      if (!m) return;
+      const price = parseFloat(m[1]);
+      if (isNaN(price) || price <= 0) return;
+
+      if (totalKeywordRe.test(line)) {
+        if (!skipKeywordRe.test(line) || /grand total/i.test(line)) {
+          if (total === null || price > total) total = price;
+        }
+        return;
+      }
+      if (skipKeywordRe.test(line)) return;
+
+      const namePart = line.slice(0, m.index).replace(/[.\-\s]+$/, "").trim();
+      if (!namePart || namePart.replace(/[^a-zA-Z]/g, "").length < 2) return;
+
+      items.push({ name: titleCaseWords(namePart), price });
+    });
+
+    return { items, total };
+  }
+
+  function renderReceiptReview(items, total) {
+    const wrap = document.getElementById("receiptReviewWrap");
+    if (!wrap) return;
+
+    if (items.length === 0 && total == null) {
+      wrap.innerHTML = '<p class="empty-note">Couldn\'t make out any items or a total on that photo. Try a clearer, well-lit shot — or just log the total by hand above.</p>';
+      return;
+    }
+
+    let html = "";
+    if (items.length) {
+      html += '<p class="sub" style="margin-top:0;">Check the items you want added to your inventory (qty 1 each, aisle "Other" by default) — edit the name or price first if needed.</p>';
+      html += '<div id="receiptItemRows">';
+      items.forEach((it, i) => {
+        html += `
+          <div class="row" style="margin-bottom:6px; flex-wrap:nowrap;" data-idx="${i}">
+            <input type="checkbox" class="receipt-item-check" checked style="width:auto;">
+            <input type="text" class="receipt-item-name" value="${escapeHtml(it.name)}" style="flex:1; min-width:0;">
+            <input type="number" class="receipt-item-price" value="${it.price}" min="0" step="0.01" style="width:80px;">
+          </div>
+        `;
+      });
+      html += "</div>";
+      html += '<button class="btn-primary" type="button" id="addReceiptItemsBtn" style="margin-top:8px;">Add checked items to inventory</button>';
+    }
+
+    if (total != null) {
+      html += `
+        <div class="row" style="margin-top:16px; align-items:center;">
+          <label class="field">Receipt total
+            <input type="number" id="receiptTotalInput" min="0" step="0.01" value="${total}" style="width:100px;">
+          </label>
+          <button class="btn-secondary" type="button" id="logReceiptTotalBtn" style="margin-top:20px;">Log total to spending</button>
+        </div>
+      `;
+    }
+
+    wrap.innerHTML = html;
+
+    const addBtn = document.getElementById("addReceiptItemsBtn");
+    if (addBtn) addBtn.addEventListener("click", () => {
+      const rows = document.querySelectorAll("#receiptItemRows .row");
+      let count = 0;
+      rows.forEach(row => {
+        if (!row.querySelector(".receipt-item-check").checked) return;
+        const name = row.querySelector(".receipt-item-name").value.trim();
+        const price = parseFloat(row.querySelector(".receipt-item-price").value) || 0;
+        if (!name) return;
+        currentPantryData().items.push({
+          id: uid(), name, category: "Other", qty: 1, unit: "", threshold: 1, expiry: "",
+          barcode: null, staple: false, restockDays: null, lastRestocked: null,
+          price: price || null
+        });
+        if (price > 0) state.costLog.push({ id: uid(), date: new Date().toISOString().slice(0, 10), amount: price, note: name });
+        count++;
+      });
+      if (count === 0) { alert("No items checked."); return; }
+      logActivity("receipt-scan", `Added ${count} item${count === 1 ? "" : "s"} from a scanned receipt to ${escapeHtml(state.currentPantry)}`);
+      saveState();
+      renderAll();
+      closeReceiptModal();
+      alert(`Added ${count} item${count === 1 ? "" : "s"} to ${state.currentPantry}.`);
+    });
+
+    const logTotalBtn = document.getElementById("logReceiptTotalBtn");
+    if (logTotalBtn) logTotalBtn.addEventListener("click", () => {
+      const amount = parseFloat(document.getElementById("receiptTotalInput").value);
+      if (!amount || amount <= 0) { alert("Enter a valid total."); return; }
+      state.costLog.push({ id: uid(), date: new Date().toISOString().slice(0, 10), amount, note: "Receipt scan" });
+      logActivity("spending", `Logged $${amount.toFixed(2)} from a scanned receipt`);
+      saveState();
+      renderSpending();
+      closeReceiptModal();
+      alert(`Logged $${amount.toFixed(2)} to spending.`);
+    });
+  }
+
+  function handleReceiptFile(file) {
+    if (!file) return;
+    if (typeof Tesseract === "undefined") {
+      setReceiptStatus("The receipt reader couldn't load (no internet connection?). You can still log a total by hand on the Spending tab.", true);
+      return;
+    }
+    setReceiptStatus("Reading receipt… this can take up to 30 seconds, especially the first time.", false);
+    document.getElementById("receiptReviewWrap").innerHTML = "";
+
+    Tesseract.recognize(file, "eng")
+      .then(({ data }) => {
+        const { items, total } = parseReceiptLines(data && data.text);
+        setReceiptStatus(
+          items.length || total != null
+            ? "Here's what we could read — check it over before adding anything."
+            : "Couldn't make out much on that photo.",
+          false
+        );
+        renderReceiptReview(items, total);
+      })
+      .catch(err => {
+        setReceiptStatus("Couldn't read that image: " + (err && err.message ? err.message : err), true);
+      });
+  }
+
+  const scanReceiptBtn = document.getElementById("scanReceiptBtn");
+  if (scanReceiptBtn) scanReceiptBtn.addEventListener("click", openReceiptModal);
+  const closeReceiptBtn = document.getElementById("closeReceiptBtn");
+  if (closeReceiptBtn) closeReceiptBtn.addEventListener("click", closeReceiptModal);
+  const receiptFileInput = document.getElementById("receiptFileInput");
+  if (receiptFileInput) receiptFileInput.addEventListener("change", e => handleReceiptFile(e.target.files[0]));
+
   // Test-only hooks: let automated tests exercise things that are hard to trigger for real
-  // (a camera scan, the passage of time for a restock reminder, etc). Harmless in normal use —
-  // nothing here is ever called unless a test explicitly invokes it.
+  // (a camera scan, OCR on an actual image, the passage of time for a restock reminder, etc).
+  // Harmless in normal use — nothing here is ever called unless a test explicitly invokes it.
   window.__pantryTestHooks = {
     handleScannedBarcode, guessCategoryFromTags,
     getState: () => state,
     renderAll, renderShoppingList, renderSpending, renderActivityLog, renderCookNow,
-    stapleDueItems
+    stapleDueItems, parseReceiptLines, renderReceiptReview
   };
 
   // ---------------- Full render ----------------
