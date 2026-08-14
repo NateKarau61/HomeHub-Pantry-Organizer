@@ -6,6 +6,7 @@
 <title>Pantry Organizer — Track Your Pantry, Plan Meals, Cut Food Waste</title>
 <meta name="description" content="A free, private pantry tracker and meal planner. Log ingredients, get expiry alerts, plan weekly meals, and auto-generate a shopping list grouped by aisle. Nothing is uploaded — your data stays in your browser.">
 <link rel="stylesheet" href="styles.css">
+<script src="https://unpkg.com/html5-qrcode@2.3.8/html5-qrcode.min.js"></script>
 </head>
 <body>
 <div class="wrap">
@@ -48,6 +49,8 @@
         <label class="field">Item name
           <input type="text" id="itemName" placeholder="e.g. Black beans">
         </label>
+        <input type="hidden" id="itemBarcode" value="">
+        <button class="btn-secondary" type="button" id="scanBtn" style="margin-top:20px;">📷 Scan barcode</button>
         <label class="field">Aisle / category
           <select id="itemCategory">
             <option>Produce</option>
@@ -89,6 +92,18 @@
       <div id="inventoryTableWrap"></div>
     </div>
   </section>
+
+  <!-- BARCODE SCAN MODAL -->
+  <div class="scan-modal" id="scanModal" style="display:none;">
+    <div class="scan-modal-inner">
+      <div class="row" style="justify-content: space-between;">
+        <h2 style="margin:0;">Scan a barcode</h2>
+        <button class="btn-secondary" type="button" id="closeScanBtn">Close</button>
+      </div>
+      <p class="sub" id="scanStatusMsg">Point your camera at a barcode. Already have it in stock? Scanning it just adds one to the count.</p>
+      <div id="qrReader"></div>
+    </div>
+  </div>
 
   <!-- QUICK COUNT TAB -->
   <section id="tab-quick" style="display:none;">
