@@ -163,14 +163,16 @@
     const unit = document.getElementById("itemUnit").value.trim();
     const threshold = parseFloat(document.getElementById("itemThreshold").value) || 0;
     const expiry = document.getElementById("itemExpiry").value;
+    const barcode = document.getElementById("itemBarcode").value.trim() || null;
 
-    currentPantryData().items.push({ id: uid(), name, category, qty, unit, threshold, expiry });
+    currentPantryData().items.push({ id: uid(), name, category, qty, unit, threshold, expiry, barcode });
 
     document.getElementById("itemName").value = "";
     document.getElementById("itemQty").value = "1";
     document.getElementById("itemUnit").value = "";
     document.getElementById("itemThreshold").value = "1";
     document.getElementById("itemExpiry").value = "";
+    document.getElementById("itemBarcode").value = "";
 
     saveState();
     renderAll();
@@ -692,6 +694,137 @@
     weekOffset = 0;
     renderAll();
   });
+
+  // ---------------- Barcode scanning ----------------
+  const OFF_LOOKUP_URL = "https://world.openfoodfacts.org/api/v2/product/";
+  const CATEGORY_KEYWORD_MAP = [
+    ["Produce", ["fruit", "vegetable", "produce"]],
+    ["Grains & Pasta", ["pasta", "rice", "cereal", "grain", "bread", "noodle"]],
+    ["Canned & Jarred", ["canned", "jarred", "preserve", "conserve"]],
+    ["Baking", ["baking", "flour", "sugar", "cake", "cookie-doughs"]],
+    ["Spices & Condiments", ["spice", "condiment", "sauce", "seasoning", "herb"]],
+    ["Snacks", ["snack", "chip", "candy", "chocolate"]],
+    ["Frozen", ["frozen"]],
+    ["Dairy & Eggs", ["dairy", "milk", "cheese", "egg", "yogurt", "yoghurt"]],
+    ["Meat & Seafood", ["meat", "seafood", "fish", "poultry", "beef", "pork", "chicken"]],
+    ["Beverages", ["beverage", "drink", "juice", "soda", "water", "coffee", "tea"]],
+    ["Cleaning & Household", ["clean", "household", "detergent", "paper-goods"]]
+  ];
+
+  let scanner = null;
+  let scannerRunning = false;
+
+  function guessCategoryFromTags(tags) {
+    if (!tags || !tags.length) return null;
+    const joined = tags.join(" ").toLowerCase();
+    for (let i = 0; i < CATEGORY_KEYWORD_MAP.length; i++) {
+      const [cat, keywords] = CATEGORY_KEYWORD_MAP[i];
+      if (keywords.some(kw => joined.includes(kw))) return cat;
+    }
+    return null;
+  }
+
+  function setScanStatus(msg, isError) {
+    const el = document.getElementById("scanStatusMsg");
+    if (!el) return;
+    el.textContent = msg;
+    el.classList.toggle("scan-error", !!isError);
+  }
+
+  function openScanModal() {
+    if (typeof Html5Qrcode === "undefined") {
+      alert("The barcode scanner couldn't load (no internet connection?). You can still add items by typing them in.");
+      return;
+    }
+    document.getElementById("scanModal").style.display = "flex";
+    setScanStatus("Point your camera at a barcode. Already have it in stock? Scanning it just adds one to the count.", false);
+
+    scanner = new Html5Qrcode("qrReader");
+    const config = {
+      fps: 10,
+      qrbox: { width: 250, height: 150 },
+      formatsToSupport: [
+        Html5QrcodeSupportedFormats.EAN_13,
+        Html5QrcodeSupportedFormats.EAN_8,
+        Html5QrcodeSupportedFormats.UPC_A,
+        Html5QrcodeSupportedFormats.UPC_E,
+        Html5QrcodeSupportedFormats.CODE_128,
+        Html5QrcodeSupportedFormats.QR_CODE
+      ]
+    };
+
+    scanner.start(
+      { facingMode: "environment" },
+      config,
+      decodedText => {
+        if (!scannerRunning) return; // ignore duplicate fires while we're already handling one
+        scannerRunning = false;
+        handleScannedBarcode(decodedText);
+      },
+      () => { /* per-frame decode errors are normal while searching for a barcode; ignore */ }
+    ).then(() => {
+      scannerRunning = true;
+    }).catch(err => {
+      setScanStatus("Couldn't access the camera: " + (err && err.message ? err.message : err), true);
+    });
+  }
+
+  function closeScanModal() {
+    document.getElementById("scanModal").style.display = "none";
+    if (scanner && scannerRunning) {
+      scanner.stop().catch(() => {});
+    }
+    scannerRunning = false;
+    scanner = null;
+  }
+
+  function handleScannedBarcode(code) {
+    // 1) If this barcode is already tracked in the current location, just bump its quantity.
+    const data = currentPantryData();
+    const existing = data.items.find(i => i.barcode === code);
+    if (existing) {
+      existing.qty = (parseFloat(existing.qty) || 0) + 1;
+      saveState();
+      renderAll();
+      closeScanModal();
+      alert(`Scanned "${existing.name}" — quantity is now ${existing.qty}.`);
+      return;
+    }
+
+    // 2) New barcode: try to look up the product, then prefill the add-item form.
+    closeScanModal();
+    document.getElementById("itemBarcode").value = code;
+    document.getElementById("itemName").value = "";
+    flashSaveStatus("Looking up barcode " + code + "…");
+
+    fetch(OFF_LOOKUP_URL + encodeURIComponent(code) + ".json")
+      .then(r => r.json())
+      .then(data => {
+        if (data && data.status === 1 && data.product) {
+          const p = data.product;
+          const name = p.product_name || p.generic_name || "";
+          if (name) document.getElementById("itemName").value = p.brands ? `${name} (${p.brands})` : name;
+          const guessed = guessCategoryFromTags(p.categories_tags);
+          if (guessed) document.getElementById("itemCategory").value = guessed;
+          flashSaveStatus(name ? `Found "${name}" — check the details and click Add item.` : `Barcode ${code} scanned — enter the name and click Add item.`);
+        } else {
+          flashSaveStatus(`Barcode ${code} scanned but not found online — enter the name and click Add item.`);
+        }
+      })
+      .catch(() => {
+        flashSaveStatus(`Barcode ${code} scanned (lookup unavailable) — enter the name and click Add item.`);
+      })
+      .finally(() => {
+        document.getElementById("itemName").focus();
+      });
+  }
+
+  document.getElementById("scanBtn").addEventListener("click", openScanModal);
+  document.getElementById("closeScanBtn").addEventListener("click", closeScanModal);
+
+  // Test-only hook: lets automated tests exercise the scan pipeline without a real camera.
+  // Harmless in normal use — it's never called unless something explicitly invokes it.
+  window.__pantryTestHooks = { handleScannedBarcode, guessCategoryFromTags };
 
   // ---------------- Full render ----------------
   function renderAll() {
