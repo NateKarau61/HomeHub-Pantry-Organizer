@@ -30,6 +30,25 @@
         <button class="btn-danger" id="removePantryBtn" style="margin-top:20px;">Remove this location</button>
       </div>
     </div>
+    <div class="row" id="addPantryPanel" style="display:none; margin-top:12px;">
+      <label class="field">Choose a location
+        <select id="newPantryPreset">
+          <option value="">— pick one —</option>
+          <option>Pantry</option>
+          <option>Freezer</option>
+          <option>Refrigerator</option>
+          <option>Garage</option>
+          <option>Basement</option>
+          <option>Cellar</option>
+          <option value="__custom">Custom name…</option>
+        </select>
+      </label>
+      <label class="field" id="newPantryCustomWrap" style="display:none;">Custom name
+        <input type="text" id="newPantryCustomName" placeholder="e.g. Camper fridge">
+      </label>
+      <button class="btn-primary" type="button" id="confirmAddPantryBtn" style="margin-top:20px;">Add</button>
+      <button class="btn-secondary" type="button" id="cancelAddPantryBtn" style="margin-top:20px;">Cancel</button>
+    </div>
   </div>
 
   <div class="tabs">
@@ -131,7 +150,9 @@
 
       <div style="margin-top:14px;">
         <label class="field" style="margin-bottom:6px;">Ingredients</label>
+        <p class="sub" style="margin-top:-2px;">Start typing to pick from items already in your pantry — the unit and aisle fill in automatically. You can still type something new if it's not in your inventory yet.</p>
         <div id="recipeIngredientRows"></div>
+        <datalist id="pantryItemNames"></datalist>
         <button class="btn-secondary" id="addIngredientRowBtn" type="button">+ Add ingredient</button>
       </div>
 
