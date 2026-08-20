@@ -7,6 +7,8 @@
 <meta name="description" content="A free, private pantry tracker and meal planner. Log ingredients, get expiry alerts, plan weekly meals, and auto-generate a shopping list grouped by aisle. Nothing is uploaded — your data stays in your browser.">
 <link rel="manifest" href="manifest.json">
 <meta name="theme-color" content="#5B7B63">
+<link rel="icon" type="image/png" sizes="32x32" href="favicon-32.png">
+<link rel="icon" type="image/png" sizes="16x16" href="favicon-16.png">
 <link rel="apple-touch-icon" href="icon-192.png">
 <link rel="stylesheet" href="styles.css">
 <script src="https://unpkg.com/html5-qrcode@2.3.8/html5-qrcode.min.js"></script>
@@ -54,38 +56,6 @@
     </div>
   </header>
 
-  <div class="card">
-    <div class="row" style="justify-content: space-between;">
-      <div class="row">
-        <label class="field">
-          Storage location
-          <select id="pantrySelect"></select>
-        </label>
-        <button class="btn-secondary" id="addPantryBtn" style="margin-top:20px;">+ Add location</button>
-        <button class="btn-danger" id="removePantryBtn" style="margin-top:20px;">Remove this location</button>
-      </div>
-    </div>
-    <div class="row" id="addPantryPanel" style="display:none; margin-top:12px;">
-      <label class="field">Choose a location
-        <select id="newPantryPreset">
-          <option value="">— pick one —</option>
-          <option>Pantry</option>
-          <option>Freezer</option>
-          <option>Refrigerator</option>
-          <option>Garage</option>
-          <option>Basement</option>
-          <option>Cellar</option>
-          <option value="__custom">Custom name…</option>
-        </select>
-      </label>
-      <label class="field" id="newPantryCustomWrap" style="display:none;">Custom name
-        <input type="text" id="newPantryCustomName" placeholder="e.g. Camper fridge">
-      </label>
-      <button class="btn-primary" type="button" id="confirmAddPantryBtn" style="margin-top:20px;">Add</button>
-      <button class="btn-secondary" type="button" id="cancelAddPantryBtn" style="margin-top:20px;">Cancel</button>
-    </div>
-  </div>
-
   <div class="tabs">
     <button class="tab-btn active" data-tab="inventory">Inventory</button>
     <button class="tab-btn" data-tab="quick">Quick count</button>
@@ -93,7 +63,7 @@
     <button class="tab-btn" data-tab="mealplan">Meal plan</button>
     <button class="tab-btn" data-tab="shopping">Shopping list</button>
     <button class="tab-btn" data-tab="spending">Spending</button>
-    <button class="tab-btn" data-tab="activity">Activity</button>
+    <button class="tab-btn" data-tab="settings">Settings</button>
   </div>
 
   <!-- INVENTORY TAB -->
@@ -101,7 +71,37 @@
     <div class="card">
       <h2>Add an item</h2>
       <p class="sub">Log what you have, how much, and when it expires (expiration date is optional).</p>
+
       <div class="row">
+        <label class="field">
+          Storage location
+          <select id="pantrySelect"></select>
+        </label>
+        <button class="btn-secondary" type="button" id="addPantryBtn" style="margin-top:20px;">+ Add location</button>
+        <button class="btn-danger" type="button" id="removePantryBtn" style="margin-top:20px;">Remove this location</button>
+      </div>
+      <div class="row" id="addPantryPanel" style="display:none; margin-top:12px;">
+        <label class="field">Choose a location
+          <select id="newPantryPreset">
+            <option value="">— pick one —</option>
+            <option>Pantry</option>
+            <option>Freezer</option>
+            <option>Refrigerator</option>
+            <option>Garage</option>
+            <option>Basement</option>
+            <option>Cellar</option>
+            <option value="__custom">Custom name…</option>
+          </select>
+        </label>
+        <label class="field" id="newPantryCustomWrap" style="display:none;">Custom name
+          <input type="text" id="newPantryCustomName" placeholder="e.g. Camper fridge">
+        </label>
+        <button class="btn-primary" type="button" id="confirmAddPantryBtn" style="margin-top:20px;">Add</button>
+        <button class="btn-secondary" type="button" id="cancelAddPantryBtn" style="margin-top:20px;">Cancel</button>
+      </div>
+      <p class="footnote" style="margin-top:6px;">New items go into the location picked above — this also controls which location's inventory shows below and in Quick count.</p>
+
+      <div class="row" style="margin-top:14px;">
         <label class="field">Item name
           <input type="text" id="itemName" placeholder="e.g. Black beans">
         </label>
@@ -155,9 +155,12 @@
     <div class="card">
       <div class="row" style="justify-content: space-between;">
         <h2 style="margin:0;">Current inventory</h2>
-        <input type="text" class="search-input" id="searchInput" placeholder="Search items...">
+        <div class="row">
+          <input type="text" class="search-input" id="searchInput" placeholder="Search items...">
+          <button class="btn-secondary" type="button" id="printInventoryBtn">🖨️ Print inventory</button>
+        </div>
       </div>
-      <p class="sub">Items expiring within 7 days or at/below their low-stock number are flagged.</p>
+      <p class="sub" id="inventorySubNote">Items expiring within 7 days or at/below their low-stock number are flagged.</p>
       <div id="inventoryTableWrap"></div>
     </div>
   </section>
@@ -299,27 +302,44 @@
     </div>
   </div>
 
-  <!-- ACTIVITY LOG TAB -->
-  <section id="tab-activity" style="display:none;">
+  <!-- SETTINGS TAB -->
+  <section id="tab-settings" style="display:none;">
+    <div class="card">
+      <h2>Preferences</h2>
+      <p class="sub">Defaults used across the app — change these any time; they sync to every device like everything else.</p>
+      <div class="row">
+        <label class="field">Flag items expiring within (days)
+          <input type="number" id="settingExpiringSoonDays" min="1" step="1" style="width:100px;">
+        </label>
+        <label class="field">Default low-stock number
+          <input type="number" id="settingDefaultLowStock" min="0" step="1" style="width:100px;">
+        </label>
+        <label class="field">Default staple restock interval (days)
+          <input type="number" id="settingDefaultRestockDays" min="1" step="1" style="width:100px;">
+        </label>
+        <button class="btn-primary" id="saveSettingsBtn" style="margin-top:20px;">Save preferences</button>
+      </div>
+    </div>
+
     <div class="card">
       <h2>Household activity</h2>
       <p class="sub">Who added, removed, or changed what — so everyone sharing this pantry can stay in sync.</p>
       <div id="activityLogWrap"></div>
     </div>
-  </section>
 
-  <div class="card">
-    <h2>Backup your data</h2>
-    <p class="sub">Everything above syncs automatically to your household's shared account, so you don't need to click Save. These buttons are for an extra offline backup file, or to start completely fresh.</p>
-    <div class="row">
-      <button class="btn-secondary" id="exportBtn">Export backup file</button>
-      <button class="btn-secondary" id="importBtn">Import backup file</button>
-      <input type="file" id="importFileInput" accept=".json" style="display:none;">
-      <button class="btn-danger" id="resetAllBtn">Reset all data</button>
+    <div class="card">
+      <h2>Backup your data</h2>
+      <p class="sub">Everything above syncs automatically to your household's shared account, so you don't need to click Save. These buttons are for an extra offline backup file, or to start completely fresh.</p>
+      <div class="row">
+        <button class="btn-secondary" id="exportBtn">Export backup file</button>
+        <button class="btn-secondary" id="importBtn">Import backup file</button>
+        <input type="file" id="importFileInput" accept=".json" style="display:none;">
+        <button class="btn-danger" id="resetAllBtn">Reset all data</button>
+      </div>
     </div>
-  </div>
 
-  <p class="footnote">Low-stock and "expiring soon" thresholds are just a starting point — adjust the numbers on each item to fit how you actually shop. Shopping-list quantities from meal plans are estimates: ingredients are matched by name across your storage locations.</p>
+    <p class="footnote">Low-stock and "expiring soon" thresholds are just a starting point — adjust the numbers on each item to fit how you actually shop. Shopping-list quantities from meal plans are estimates: ingredients are matched by name across your storage locations.</p>
+  </section>
 </div>
 
 <!-- UNDO TOAST -->

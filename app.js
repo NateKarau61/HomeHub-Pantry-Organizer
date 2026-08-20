@@ -3,7 +3,6 @@
 
   const STORAGE_KEY = "pantryOrganizerData";
   const CATEGORIES_ORDER = ["Produce","Grains & Pasta","Canned & Jarred","Baking","Spices & Condiments","Snacks","Frozen","Dairy & Eggs","Meat & Seafood","Beverages","Cleaning & Household","Other"];
-  const EXPIRING_SOON_DAYS = 7;
   const MEAL_SLOTS = ["breakfast", "lunch", "dinner"];
   const MEAL_SLOT_LABELS = { breakfast: "Breakfast", lunch: "Lunch", dinner: "Dinner" };
 
@@ -12,9 +11,13 @@
     return "id_" + Date.now().toString(36) + "_" + (uidCounter++) + "_" + Math.random().toString(36).slice(2, 7);
   }
 
+  function defaultSettings() {
+    return { expiringSoonDays: 7, defaultLowStock: 1, defaultRestockDays: 14 };
+  }
+
   function defaultState() {
     return {
-      version: 3,
+      version: 4,
       pantries: { "Main Pantry": { items: [] } },
       currentPantry: "Main Pantry",
       recipes: [],
@@ -22,7 +25,8 @@
       shoppingExtras: [],
       shoppingAutoChecked: {},
       costLog: [],
-      activityLog: []
+      activityLog: [],
+      settings: defaultSettings()
     };
   }
 
@@ -35,7 +39,8 @@
       shoppingExtras: (raw && raw.shoppingExtras) || [],
       shoppingAutoChecked: (raw && raw.shoppingAutoChecked) || {},
       costLog: (raw && raw.costLog) || [],
-      activityLog: (raw && raw.activityLog) || []
+      activityLog: (raw && raw.activityLog) || [],
+      settings: Object.assign(defaultSettings(), (raw && raw.settings) || {})
     });
   }
 
@@ -326,7 +331,7 @@
   });
 
   // ---------------- Tabs ----------------
-  const TAB_NAMES = ["inventory", "quick", "recipes", "mealplan", "shopping", "spending", "activity"];
+  const TAB_NAMES = ["inventory", "quick", "recipes", "mealplan", "shopping", "spending", "settings"];
   document.querySelectorAll(".tab-btn").forEach(btn => {
     btn.addEventListener("click", () => {
       document.querySelectorAll(".tab-btn").forEach(b => b.classList.remove("active"));
@@ -341,7 +346,7 @@
       if (tab === "mealplan") renderMealPlan();
       if (tab === "shopping") renderShoppingList();
       if (tab === "spending") renderSpending();
-      if (tab === "activity") renderActivityLog();
+      if (tab === "settings") { renderActivityLog(); renderSettingsForm(); }
     });
   });
 
@@ -376,7 +381,7 @@
     const stapleEl = document.getElementById("itemStaple");
     const staple = !!(stapleEl && stapleEl.checked);
     const restockDaysEl = document.getElementById("itemRestockDays");
-    const restockDays = staple ? (parseFloat(restockDaysEl && restockDaysEl.value) || 14) : null;
+    const restockDays = staple ? (parseFloat(restockDaysEl && restockDaysEl.value) || state.settings.defaultRestockDays) : null;
     const priceEl = document.getElementById("itemPrice");
     const price = priceEl && priceEl.value ? parseFloat(priceEl.value) : null;
 
@@ -397,7 +402,7 @@
     document.getElementById("itemName").value = "";
     document.getElementById("itemQty").value = "1";
     document.getElementById("itemUnit").value = "";
-    document.getElementById("itemThreshold").value = "1";
+    document.getElementById("itemThreshold").value = String(state.settings.defaultLowStock);
     document.getElementById("itemExpiry").value = "";
     document.getElementById("itemBarcode").value = "";
     if (stapleEl) stapleEl.checked = false;
@@ -446,7 +451,7 @@
     if (!item) return;
     item.staple = !item.staple;
     if (item.staple) {
-      if (!item.restockDays) item.restockDays = 14;
+      if (!item.restockDays) item.restockDays = state.settings.defaultRestockDays;
       if (!item.lastRestocked) item.lastRestocked = new Date().toISOString().slice(0, 10);
     }
     saveState();
@@ -468,6 +473,9 @@
     const wrap = document.getElementById("inventoryTableWrap");
     const filtered = data.items.filter(i => i.name.toLowerCase().includes(search));
 
+    const subNote = document.getElementById("inventorySubNote");
+    if (subNote) subNote.textContent = `Items expiring within ${state.settings.expiringSoonDays} day${state.settings.expiringSoonDays === 1 ? "" : "s"} or at/below their low-stock number are flagged.`;
+
     if (filtered.length === 0) {
       wrap.innerHTML = '<p class="empty-note">No items yet. Add your first one above.</p>';
       return;
@@ -487,7 +495,7 @@
       html += `<tr><td colspan="5" class="category-heading">${escapeHtml(cat)}</td></tr>`;
       byCategory[cat].forEach(item => {
         const dLeft = daysUntil(item.expiry);
-        const isExpiring = dLeft !== null && dLeft <= EXPIRING_SOON_DAYS;
+        const isExpiring = dLeft !== null && dLeft <= state.settings.expiringSoonDays;
         const isLow = item.qty <= item.threshold;
         const rowClasses = [];
         if (isLow) rowClasses.push("low-stock");
@@ -499,7 +507,7 @@
         }
 
         html += `<tr class="${rowClasses.join(" ")}">
-          <td data-label="Item">${escapeHtml(item.name)}${item.staple ? ' <span class="pill amber" title="Staple — restocks every ' + (item.restockDays || 14) + ' days">★ staple</span>' : ""}</td>
+          <td data-label="Item">${escapeHtml(item.name)}${item.staple ? ' <span class="pill amber" title="Staple — restocks every ' + (item.restockDays || state.settings.defaultRestockDays) + ' days">★ staple</span>' : ""}</td>
           <td data-label="Qty" class="qty-cell">${item.qty}${isLow ? ' <span class="pill warn">low</span>' : ""}</td>
           <td data-label="Unit">${escapeHtml(item.unit || "—")}</td>
           <td data-label="Expires" class="exp-cell">${expText}</td>
@@ -947,7 +955,7 @@
     Object.keys(state.pantries).forEach(loc => {
       state.pantries[loc].items.forEach(item => {
         if (!item.staple) return;
-        const days = parseFloat(item.restockDays) || 14;
+        const days = parseFloat(item.restockDays) || state.settings.defaultRestockDays;
         const last = item.lastRestocked ? new Date(item.lastRestocked + "T00:00:00") : null;
         const dueDate = last ? new Date(last.getTime() + days * 86400000) : today;
         if (dueDate <= today) out.push({ location: loc, item });
@@ -1115,6 +1123,40 @@
     window.print();
   });
 
+  const printInventoryBtn = document.getElementById("printInventoryBtn");
+  if (printInventoryBtn) printInventoryBtn.addEventListener("click", () => {
+    const data = currentPantryData();
+    if (data.items.length === 0) { alert(`No items in "${state.currentPantry}" to print.`); return; }
+
+    const byCategory = {};
+    data.items.forEach(item => {
+      const cat = item.category || "Other";
+      if (!byCategory[cat]) byCategory[cat] = [];
+      byCategory[cat].push(item);
+    });
+    const cats = CATEGORIES_ORDER.filter(c => byCategory[c]).concat(Object.keys(byCategory).filter(c => !CATEGORIES_ORDER.includes(c)));
+    const dateStr = new Date().toLocaleDateString(undefined, { year: "numeric", month: "long", day: "numeric" });
+
+    const printArea = document.getElementById("printArea");
+    printArea.innerHTML = `
+      <h1>🥫 ${escapeHtml(state.currentPantry)} — Inventory</h1>
+      <p style="color:#555; margin:0 0 12px;">${dateStr}</p>
+      ${cats.map(cat => `
+        <h3>${escapeHtml(cat)}</h3>
+        <ul>
+          ${byCategory[cat].map(item => {
+            const qtyText = `${item.qty}${item.unit ? " " + escapeHtml(item.unit) : ""}`;
+            const expText = item.expiry ? " — exp " + escapeHtml(item.expiry) : "";
+            const stapleText = item.staple ? " (staple)" : "";
+            return `<li>${escapeHtml(item.name)} — ${qtyText}${expText}${stapleText}</li>`;
+          }).join("")}
+        </ul>
+      `).join("")}
+    `;
+
+    window.print();
+  });
+
   // ---------------- Spending / cost tracking ----------------
   function addCostEntry() {
     const amountEl = document.getElementById("costAmount");
@@ -1180,6 +1222,44 @@
       </div>
     `).join("");
   }
+
+  // ---------------- Settings / preferences ----------------
+  function applyDefaultsToItemForm() {
+    const thresholdEl = document.getElementById("itemThreshold");
+    if (thresholdEl && document.activeElement !== thresholdEl) thresholdEl.value = String(state.settings.defaultLowStock);
+    const restockDaysEl = document.getElementById("itemRestockDays");
+    if (restockDaysEl) restockDaysEl.placeholder = String(state.settings.defaultRestockDays);
+  }
+
+  function renderSettingsForm() {
+    const daysEl = document.getElementById("settingExpiringSoonDays");
+    const lowStockEl = document.getElementById("settingDefaultLowStock");
+    const restockEl = document.getElementById("settingDefaultRestockDays");
+    if (!daysEl || !lowStockEl || !restockEl) return;
+    // Don't clobber values while someone's actively editing the form (e.g. a sync landed mid-edit).
+    if (document.activeElement === daysEl || document.activeElement === lowStockEl || document.activeElement === restockEl) return;
+    daysEl.value = String(state.settings.expiringSoonDays);
+    lowStockEl.value = String(state.settings.defaultLowStock);
+    restockEl.value = String(state.settings.defaultRestockDays);
+  }
+
+  const saveSettingsBtn = document.getElementById("saveSettingsBtn");
+  if (saveSettingsBtn) saveSettingsBtn.addEventListener("click", () => {
+    const days = parseFloat(document.getElementById("settingExpiringSoonDays").value);
+    const lowStock = parseFloat(document.getElementById("settingDefaultLowStock").value);
+    const restock = parseFloat(document.getElementById("settingDefaultRestockDays").value);
+    if (!days || days < 1) { alert("\"Flag items expiring within\" needs to be at least 1 day."); return; }
+    if (lowStock == null || isNaN(lowStock) || lowStock < 0) { alert("Default low-stock number needs to be 0 or more."); return; }
+    if (!restock || restock < 1) { alert("Default staple restock interval needs to be at least 1 day."); return; }
+
+    state.settings = { expiringSoonDays: days, defaultLowStock: lowStock, defaultRestockDays: restock };
+    logActivity("settings", `Updated preferences (expiring-soon: ${days}d, default low-stock: ${lowStock}, default restock: ${restock}d)`);
+    saveState();
+    applyDefaultsToItemForm();
+    renderInventory();
+    renderShoppingList();
+    alert("Preferences saved.");
+  });
 
   // ---------------- Backup / export / import / reset ----------------
   document.getElementById("exportBtn").addEventListener("click", () => {
@@ -1559,7 +1639,7 @@
     handleScannedBarcode, guessCategoryFromTags,
     getState: () => state,
     renderAll, renderShoppingList, renderSpending, renderActivityLog, renderCookNow,
-    stapleDueItems, parseReceiptLines, renderReceiptReview
+    stapleDueItems, parseReceiptLines, renderReceiptReview, renderSettingsForm
   };
 
   // ---------------- Full render ----------------
@@ -1574,6 +1654,8 @@
     renderPantryItemNamesDatalist();
     renderSpending();
     renderActivityLog();
+    renderSettingsForm();
+    applyDefaultsToItemForm();
   }
 
   window.pantryApp = {

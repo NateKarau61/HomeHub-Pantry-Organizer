@@ -2,7 +2,7 @@
 // whatever was last loaded) without a signal. Anything from another origin — Firebase,
 // the barcode lookup API, the html5-qrcode CDN script — always goes straight to the network,
 // since that data needs to be live, not cached.
-const CACHE_NAME = "pantry-organizer-v1";
+const CACHE_NAME = "pantry-organizer-v2";
 const APP_SHELL = [
   "./",
   "./index.html",
@@ -11,7 +11,9 @@ const APP_SHELL = [
   "./firebase-config.js",
   "./manifest.json",
   "./icon-192.png",
-  "./icon-512.png"
+  "./icon-512.png",
+  "./favicon-32.png",
+  "./favicon-16.png"
 ];
 
 self.addEventListener("install", event => {
