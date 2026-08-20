@@ -90,6 +90,12 @@
     </div>
 
     <div class="card">
+      <h2>🏆 Pantry Health Score</h2>
+      <p class="sub">A quick read on how things are going overall — stock levels, freshness, staples on schedule, and how much has gone to waste.</p>
+      <div id="dashboardHealthScoreWrap"></div>
+    </div>
+
+    <div class="card">
       <h2>⚠️ Needs attention</h2>
       <p class="sub">Items running low or expiring soon, across every storage location.</p>
       <div id="dashboardNeedsAttentionWrap"></div>
@@ -358,6 +364,31 @@
       <div class="row" id="spendingStats" style="margin-top:14px;"></div>
       <div id="spendingListWrap" style="margin-top:14px;"></div>
     </div>
+
+    <div class="card">
+      <h2>Monthly budget</h2>
+      <p class="sub">Optional — set a target to see how this month's spending compares. Leave blank to turn it off.</p>
+      <div class="row">
+        <label class="field">Monthly budget ($)
+          <input type="number" id="monthlyBudgetInput" min="0" step="1" placeholder="e.g. 600" style="width:120px;">
+        </label>
+        <button class="btn-secondary" id="saveBudgetBtn" style="margin-top:20px;">Save budget</button>
+      </div>
+      <div id="budgetWrap" style="margin-top:12px;"></div>
+    </div>
+
+    <div class="card">
+      <h2>Spending trends</h2>
+      <p class="sub">Built from priced pantry items and scanned receipts, which carry a category — hand-logged trip totals are left out since they're one lump sum.</p>
+      <div id="spendingTrendsWrap"></div>
+    </div>
+
+    <div class="card">
+      <h2>🗑️ Food waste</h2>
+      <p class="sub">What's gone to waste — tossed leftovers and pantry items pulled for being expired or spoiled — separate from what just got used up.</p>
+      <div class="row" id="foodWasteStats"></div>
+      <div id="foodWasteWrap" style="margin-top:12px;"></div>
+    </div>
   </section>
 
   <!-- RECEIPT SCAN MODAL -->
@@ -399,6 +430,13 @@
           Dark theme
         </label>
       </div>
+    </div>
+
+    <div class="card">
+      <h2>Household members</h2>
+      <p class="sub">Everyone who's logged in shows up here automatically. Roles are for your own organization — a "Kid" role hides the Spending and Settings tabs for that person.</p>
+      <div id="householdMembersWrap"></div>
+      <p class="footnote">Roles are a convenience, not a security boundary: the shared login means anyone signed in can still see and edit everything if they really want to — Firestore isn't set up to enforce per-role permissions.</p>
     </div>
 
     <div class="card">

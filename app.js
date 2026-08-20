@@ -12,7 +12,7 @@
   }
 
   function defaultSettings() {
-    return { expiringSoonDays: 7, defaultLowStock: 1, defaultRestockDays: 14, darkTheme: false, leftoverShelfLifeDays: 4 };
+    return { expiringSoonDays: 7, defaultLowStock: 1, defaultRestockDays: 14, darkTheme: false, leftoverShelfLifeDays: 4, monthlyBudget: null };
   }
 
   function applyTheme() {
@@ -33,6 +33,8 @@
       consumptionLog: [],
       leftovers: [],
       dismissedNotifications: {},
+      foodWasteLog: [],
+      householdMembers: {},
       settings: defaultSettings()
     };
   }
@@ -50,6 +52,8 @@
       consumptionLog: (raw && raw.consumptionLog) || [],
       leftovers: (raw && raw.leftovers) || [],
       dismissedNotifications: (raw && raw.dismissedNotifications) || {},
+      foodWasteLog: (raw && raw.foodWasteLog) || [],
+      householdMembers: (raw && raw.householdMembers) || {},
       settings: Object.assign(defaultSettings(), (raw && raw.settings) || {})
     });
   }
@@ -126,6 +130,7 @@
           renderAll();
         }
         applyingRemoteUpdate = false;
+        ensureHouseholdMember();
       },
       () => {
         flashSaveStatus("Sync error — check your connection");
@@ -188,6 +193,79 @@
     return (fbAuth && fbAuth.currentUser && fbAuth.currentUser.email) || "Someone";
   }
 
+  // ---------------- Household members & roles ----------------
+  // Everyone in the household signs in with their own email/password (see the login screen),
+  // but until now nothing distinguished one signed-in person from another beyond the activity
+  // log. This keeps a light roster of who's signed in and an organizational role for each —
+  // "kid" hides the Settings and Spending tabs for that person. IMPORTANT: this is a client-side
+  // convenience, not a security boundary — the shared Firestore rule only checks that *someone*
+  // is logged in, so anyone with the household login could still edit anything by hand. Said
+  // plainly in the Settings-tab footnote and the README too.
+  function ensureHouseholdMember() {
+    const email = currentUserLabel();
+    if (!email || email === "Someone") return;
+    state.householdMembers = state.householdMembers || {};
+    if (state.householdMembers[email]) return;
+    const isFirst = Object.keys(state.householdMembers).length === 0;
+    const displayName = titleCaseWords(email.split("@")[0].replace(/[._-]+/g, " ")) || email;
+    state.householdMembers[email] = { email, displayName, role: isFirst ? "owner" : "member" };
+    saveState();
+    renderHouseholdMembers();
+    applyRolePermissions();
+  }
+
+  function currentRole() {
+    const m = (state.householdMembers || {})[currentUserLabel()];
+    return m ? m.role : "member";
+  }
+
+  // Hides tabs that don't make sense for a "kid" role — administrative/financial areas, not
+  // day-to-day pantry use. Bounces away if that tab happens to be open when the role changes.
+  function applyRolePermissions() {
+    const restricted = currentRole() === "kid";
+    ["spending", "settings"].forEach(t => {
+      const btn = document.querySelector(`.tab-btn[data-tab="${t}"]`);
+      if (btn) btn.style.display = restricted ? "none" : "";
+    });
+    if (restricted) {
+      const activeBtn = document.querySelector(".tab-btn.active");
+      if (activeBtn && (activeBtn.dataset.tab === "spending" || activeBtn.dataset.tab === "settings")) {
+        activateTab("dashboard");
+      }
+    }
+  }
+
+  function setMemberRole(email, role) {
+    state.householdMembers = state.householdMembers || {};
+    if (!state.householdMembers[email]) return;
+    state.householdMembers[email].role = role;
+    logActivity("role", `Set ${email}'s role to ${role}`);
+    saveState();
+    renderHouseholdMembers();
+    applyRolePermissions();
+  }
+
+  function renderHouseholdMembers() {
+    const wrap = document.getElementById("householdMembersWrap");
+    if (!wrap) return;
+    const members = Object.values(state.householdMembers || {});
+    if (members.length === 0) {
+      wrap.innerHTML = '<p class="empty-note">No one has logged in yet.</p>';
+      return;
+    }
+    wrap.innerHTML = members.map(m => `
+      <div class="shopping-item">
+        <span class="label">${escapeHtml(m.displayName)}</span>
+        <span class="footnote" style="margin:0 8px;">${escapeHtml(m.email)}</span>
+        <select style="margin-left:auto;" onchange="pantryApp.setMemberRole('${escapeForInlineJs(m.email)}', this.value)">
+          <option value="owner" ${m.role === "owner" ? "selected" : ""}>Owner</option>
+          <option value="member" ${m.role === "member" ? "selected" : ""}>Member</option>
+          <option value="kid" ${m.role === "kid" ? "selected" : ""}>Kid</option>
+        </select>
+      </div>
+    `).join("");
+  }
+
   function logActivity(action, detail) {
     state.activityLog = state.activityLog || [];
     state.activityLog.unshift({ id: uid(), ts: Date.now(), user: currentUserLabel(), action, detail });
@@ -231,6 +309,56 @@
         <span class="label">${c.source === "cooked" ? "🍳" : "✋"} ${escapeHtml(c.name)}</span>
         <span class="footnote" style="margin:0 8px 0 auto;">${c.qty}${c.unit ? " " + escapeHtml(c.unit) : ""}</span>
         <span class="footnote" style="margin:0; white-space:nowrap;">${timeAgo(c.ts)}</span>
+      </div>
+    `).join("");
+  }
+
+  // ---------------- Food waste tracking ----------------
+  // Separate from leftovers on purpose: leftovers track food that's still around and might get
+  // eaten; this tracks food that's confirmed gone to waste (tossed leftovers, or pantry items
+  // pulled for being expired/spoiled) — the two feed different things (leftovers show a
+  // countdown on the Dashboard; waste feeds the Spending tab's waste summary and pulls down the
+  // Pantry Health Score). Returns the created entry so callers can undo cleanly.
+  function logFoodWaste(name, qty, unit, source, estCost) {
+    if (!name || !qty || qty <= 0) return null;
+    state.foodWasteLog = state.foodWasteLog || [];
+    const entry = { id: uid(), ts: Date.now(), name, qty, unit: unit || "", source, estCost: estCost != null ? estCost : null };
+    state.foodWasteLog.unshift(entry);
+    if (state.foodWasteLog.length > 300) state.foodWasteLog.length = 300;
+    return entry;
+  }
+
+  function removeFoodWasteEntry(id) {
+    state.foodWasteLog = (state.foodWasteLog || []).filter(w => w.id !== id);
+  }
+
+  function foodWasteSince(days) {
+    const cutoff = Date.now() - days * 86400000;
+    return (state.foodWasteLog || []).filter(w => w.ts >= cutoff);
+  }
+
+  function renderFoodWaste() {
+    const wrap = document.getElementById("foodWasteWrap");
+    const statsWrap = document.getElementById("foodWasteStats");
+    if (!wrap || !statsWrap) return;
+    const recent = foodWasteSince(30);
+    const totalCost = recent.reduce((sum, w) => sum + (w.estCost != null ? w.estCost : 0), 0);
+    const anyCost = recent.some(w => w.estCost != null);
+    statsWrap.innerHTML = `
+      <span class="pill ${recent.length ? "warn" : ""}">${recent.length} item${recent.length === 1 ? "" : "s"} wasted (30d)</span>
+      ${anyCost ? `<span class="pill amber">~$${totalCost.toFixed(2)} wasted (30d)</span>` : ""}
+    `;
+    const log = (state.foodWasteLog || []).slice(0, 20);
+    if (log.length === 0) {
+      wrap.innerHTML = '<p class="empty-note">Nothing logged as wasted — tossing an expired item or a leftover you didn\'t get to will show up here.</p>';
+      return;
+    }
+    wrap.innerHTML = log.map(w => `
+      <div class="shopping-item">
+        <span class="label">${escapeHtml(w.name)}</span>
+        <span class="footnote" style="margin:0 8px;">${w.qty}${w.unit ? " " + escapeHtml(w.unit) : ""} · ${w.source === "leftover" ? "leftover" : "pantry"}</span>
+        ${w.estCost != null ? `<span class="pill amber">~$${w.estCost.toFixed(2)}</span>` : ""}
+        <span class="footnote" style="margin:0 0 0 auto; white-space:nowrap;">${timeAgo(w.ts)}</span>
       </div>
     `).join("");
   }
@@ -432,7 +560,7 @@
     if (tab === "mealplan") renderMealPlan();
     if (tab === "shopping") renderShoppingList();
     if (tab === "spending") renderSpending();
-    if (tab === "settings") { renderActivityLog(); renderSettingsForm(); }
+    if (tab === "settings") { renderActivityLog(); renderSettingsForm(); renderHouseholdMembers(); }
   }
 
   document.querySelectorAll(".tab-btn").forEach(btn => {
@@ -553,6 +681,54 @@
     panel.style.display = "none";
   });
 
+  // ---------------- Pantry Health Score ----------------
+  // A single 0-100 number meant to answer "how are we doing overall?" at a glance — but shown
+  // with its breakdown right alongside it (see renderPantryHealthScore) rather than as an
+  // unexplained black-box number, the same way "What can I make?" shows its per-ingredient work.
+  function pantryHealthScore() {
+    const allItems = allItemsAcrossLocations();
+    const total = allItems.length;
+    const expiredCount = allItems.filter(i => { const d = daysUntil(i.expiry); return d !== null && d < 0; }).length;
+    const lowCount = lowStockItems().length;
+    const staples = allItems.filter(i => i.staple);
+    const overdueStaples = stapleDueItems().length;
+    const wasted30 = foodWasteSince(30).length;
+    const used30 = (state.consumptionLog || []).filter(c => c.ts >= Date.now() - 30 * 86400000).length;
+
+    const stockHealth = total ? 1 - Math.min(1, lowCount / total) : 1;
+    const freshness = total ? 1 - Math.min(1, expiredCount / total) : 1;
+    const stapleHealth = staples.length ? 1 - Math.min(1, overdueStaples / staples.length) : 1;
+    const wasteHealth = (wasted30 + used30) > 0 ? 1 - Math.min(1, wasted30 / (wasted30 + used30)) : 1;
+
+    const score = Math.round(100 * (stockHealth * 0.3 + freshness * 0.3 + stapleHealth * 0.2 + wasteHealth * 0.2));
+    const label = score >= 85 ? "Excellent" : score >= 70 ? "Good" : score >= 50 ? "Needs attention" : "Struggling";
+    return {
+      score, label,
+      breakdown: [
+        { label: "Stock levels", pct: Math.round(stockHealth * 100) },
+        { label: "Freshness", pct: Math.round(freshness * 100) },
+        { label: "Staples on schedule", pct: Math.round(stapleHealth * 100) },
+        { label: "Low waste", pct: Math.round(wasteHealth * 100) }
+      ]
+    };
+  }
+
+  function renderPantryHealthScore() {
+    const wrap = document.getElementById("dashboardHealthScoreWrap");
+    if (!wrap) return;
+    const { score, label, breakdown } = pantryHealthScore();
+    const cls = score >= 85 ? "full" : score >= 50 ? "mid" : "low";
+    wrap.innerHTML = `
+      <div class="row" style="align-items:baseline; gap:12px;">
+        <span class="health-score-number">${score}</span>
+        <span class="readiness-pct ${cls}">${escapeHtml(label)}</span>
+      </div>
+      <ul class="readiness-ing-list" style="margin-top:10px;">
+        ${breakdown.map(b => `<li class="${b.pct < 60 ? "missing" : ""}"><span class="dot"></span>${escapeHtml(b.label)} — ${b.pct}%</li>`).join("")}
+      </ul>
+    `;
+  }
+
   // ---------------- Dashboard ----------------
   // A one-glance summary: status counts, what needs attention, top-ready recipes, this week's
   // meal plan, and the shopping list size — all built from the same helpers the other tabs use,
@@ -609,7 +785,8 @@
         <div class="shopping-item">
           <span class="label">🍱 ${escapeHtml(lo.name)} (leftovers)</span>
           <span class="pill warn">${when}</span>
-          <button class="btn-danger" style="margin-left:auto;" onclick="pantryApp.removeLeftover('${lo.id}')">Used up</button>
+          <button class="btn-secondary" style="margin-left:auto;" onclick="pantryApp.removeLeftover('${lo.id}')">✅ Ate it</button>
+          <button class="btn-danger" onclick="pantryApp.wasteLeftover('${lo.id}')">🗑️ Tossed</button>
         </div>`;
       });
       let html = (rows.length || leftoverRows.length) ? rows.join("") + leftoverRows.join("") : '<p class="empty-note">Nothing needs attention right now.</p>';
@@ -665,6 +842,7 @@
 
     renderRecentlyUsed();
     renderLeftovers();
+    renderPantryHealthScore();
   }
 
   // ---------------- Inventory ----------------
@@ -735,7 +913,7 @@
     data.items.push(newItem);
 
     if (price != null && !isNaN(price) && price > 0) {
-      state.costLog.push({ id: uid(), date: new Date().toISOString().slice(0, 10), amount: price, note: name });
+      state.costLog.push({ id: uid(), date: new Date().toISOString().slice(0, 10), amount: price, note: name, category: category || "Other" });
     }
 
     logActivity("add", `Added "${name}"${qty ? " ×" + qty : ""} to ${escapeHtml(state.currentPantry)}`);
@@ -773,6 +951,34 @@
       const pantry = state.pantries[location];
       if (pantry) {
         pantry.items.splice(Math.min(idx, pantry.items.length), 0, removed);
+        logActivity("undo", `Restored "${removed.name}" to ${escapeHtml(location)}`);
+        saveState();
+        renderAll();
+      }
+    });
+  }
+
+  // Like removeItem, but for the "this went bad, not just used up" case — logs it to the
+  // food-waste tracker (with an estimated cost if a price was on file) instead of quietly
+  // disappearing. Offered on Inventory cards only when the item is flagged expiring/expired.
+  function wasteItem(location, id) {
+    const data = state.pantries[location];
+    if (!data) return;
+    const idx = data.items.findIndex(i => i.id === id);
+    if (idx === -1) return;
+    const removed = data.items[idx];
+    const qty = parseFloat(removed.qty) || 0;
+    const cost = removed.price != null ? removed.price * qty : null;
+    const wasteEntry = logFoodWaste(removed.name, qty, removed.unit, "pantry", cost);
+    data.items.splice(idx, 1);
+    logActivity("waste", `Tossed "${removed.name}"${qty ? " ×" + qty : ""} from ${escapeHtml(location)} (expired/spoiled)`);
+    saveState();
+    renderAll();
+    showUndoToast(`Tossed "${removed.name}".`, () => {
+      const pantry = state.pantries[location];
+      if (pantry) {
+        pantry.items.splice(Math.min(idx, pantry.items.length), 0, removed);
+        if (wasteEntry) removeFoodWasteEntry(wasteEntry.id);
         logActivity("undo", `Restored "${removed.name}" to ${escapeHtml(location)}`);
         saveState();
         renderAll();
@@ -901,6 +1107,7 @@
               <div class="row" style="margin-top:8px;">
                 <button class="btn-icon" title="Toggle staple / recurring restock reminder" onclick="pantryApp.toggleStaple('${escapeForInlineJs(loc)}', '${item.id}')">${item.staple ? "★" : "☆"}</button>
                 <button class="btn-danger" onclick="pantryApp.removeItem('${escapeForInlineJs(loc)}', '${item.id}')">Remove</button>
+                ${isExpiring ? `<button class="btn-danger" title="Log as spoiled/expired instead of just removing" onclick="pantryApp.wasteItem('${escapeForInlineJs(loc)}', '${item.id}')">🗑️ Toss</button>` : ""}
               </div>
             </div>`;
         }).join("")}
@@ -1257,11 +1464,22 @@
     });
   }
 
-  function removeLeftover(id) {
+  // Resolves a tracked leftover one of two ways: eaten (no waste logged) or tossed (logged to
+  // the food-waste tracker so it counts toward the Pantry Health Score and the Spending tab's
+  // waste summary). `removeLeftover` is kept as the "ate it, no waste" case so existing calls
+  // (and the meal-plan slot's own "Ate it" button, which has its own simpler path) keep working.
+  function resolveLeftover(id, wasted) {
+    const lo = (state.leftovers || []).find(l => l.id === id);
+    if (!lo) return;
+    if (wasted) logFoodWaste(lo.name, lo.portions, lo.portions === 1 ? "portion" : "portions", "leftover", null);
     state.leftovers = (state.leftovers || []).filter(l => l.id !== id);
+    logActivity(wasted ? "waste" : "leftover-eaten", `${wasted ? "Tossed" : "Ate"} leftover "${lo.name}"`);
     saveState();
     renderAll();
   }
+
+  function removeLeftover(id) { resolveLeftover(id, false); }
+  function wasteLeftover(id) { resolveLeftover(id, true); }
 
   function activeLeftovers() {
     return (state.leftovers || []).slice().sort((a, b) => (a.expiresOn || "").localeCompare(b.expiresOn || ""));
@@ -1294,7 +1512,8 @@
           <span class="label">🍱 ${escapeHtml(lo.name)}</span>
           <span class="footnote" style="margin:0 8px;">${lo.portions} portion${lo.portions === 1 ? "" : "s"}</span>
           <span class="pill ${d != null && d <= 1 ? "warn" : ""}">${when}</span>
-          <button class="btn-danger" style="margin-left:auto;" onclick="pantryApp.removeLeftover('${lo.id}')">Used up</button>
+          <button class="btn-secondary" style="margin-left:auto;" onclick="pantryApp.removeLeftover('${lo.id}')">✅ Ate it</button>
+          <button class="btn-danger" onclick="pantryApp.wasteLeftover('${lo.id}')">🗑️ Tossed</button>
         </div>`;
     }).join("");
   }
@@ -1872,6 +2091,10 @@
     const statsWrap = document.getElementById("spendingStats");
     if (!wrap || !statsWrap) return;
 
+    renderBudget();
+    renderSpendingTrends();
+    renderFoodWaste();
+
     const log = (state.costLog || []).slice().sort((a, b) => (b.date || "").localeCompare(a.date || ""));
 
     const cutoff30 = Date.now() - 30 * 86400000;
@@ -1898,10 +2121,93 @@
 
     wrap.innerHTML = log.map(c => `
       <div class="shopping-item">
-        <span class="label">${escapeHtml(c.date)} — $${(parseFloat(c.amount) || 0).toFixed(2)}${c.note ? " · " + escapeHtml(c.note) : ""}</span>
+        <span class="label">${escapeHtml(c.date)} — $${(parseFloat(c.amount) || 0).toFixed(2)}${c.note ? " · " + escapeHtml(c.note) : ""}${c.category ? " · " + escapeHtml(c.category) : ""}</span>
         <button class="btn-danger" style="margin-left:auto;" onclick="pantryApp.removeCostEntry('${c.id}')">Remove</button>
       </div>
     `).join("");
+  }
+
+  function monthKey(dateStr) { return (dateStr || "").slice(0, 7); }
+
+  function renderBudget() {
+    const wrap = document.getElementById("budgetWrap");
+    const input = document.getElementById("monthlyBudgetInput");
+    if (!wrap) return;
+    if (input && document.activeElement !== input) input.value = state.settings.monthlyBudget != null ? String(state.settings.monthlyBudget) : "";
+    const budget = state.settings.monthlyBudget;
+    if (!budget) { wrap.innerHTML = ""; return; }
+    const thisMonth = monthKey(new Date().toISOString().slice(0, 10));
+    const spent = (state.costLog || []).filter(c => monthKey(c.date) === thisMonth).reduce((sum, c) => sum + (parseFloat(c.amount) || 0), 0);
+    const pct = Math.min(100, Math.round((spent / budget) * 100));
+    const over = spent > budget;
+    wrap.innerHTML = `
+      <div class="row" style="justify-content:space-between;">
+        <strong>This month's budget</strong>
+        <span class="pill ${over ? "warn" : ""}">$${spent.toFixed(2)} of $${budget.toFixed(2)}</span>
+      </div>
+      <div class="readiness-bar" style="margin-top:6px;">
+        <div class="readiness-bar-fill" style="width:${pct}%;${over ? " background:var(--terracotta);" : ""}"></div>
+      </div>
+    `;
+  }
+
+  function saveBudget() {
+    const input = document.getElementById("monthlyBudgetInput");
+    if (!input) return;
+    const raw = input.value.trim();
+    const val = raw === "" ? null : parseFloat(raw);
+    if (raw !== "" && (isNaN(val) || val < 0)) { alert("Enter a budget of 0 or more, or leave it blank to turn budgeting off."); return; }
+    state.settings.monthlyBudget = (val != null && !isNaN(val)) ? val : null;
+    logActivity("settings", state.settings.monthlyBudget != null ? `Set monthly grocery budget to $${state.settings.monthlyBudget.toFixed(2)}` : "Turned off the monthly grocery budget");
+    saveState();
+    renderBudget();
+  }
+  const saveBudgetBtn = document.getElementById("saveBudgetBtn");
+  if (saveBudgetBtn) saveBudgetBtn.addEventListener("click", saveBudget);
+
+  // Last 6 months of totals (a lightweight bar list, no charting library) plus a by-category
+  // breakdown for the current month — built only from entries that have a category (priced
+  // inventory items and receipt-scanned lines), since a hand-logged trip total is one lump sum
+  // that isn't tied to any single aisle.
+  function renderSpendingTrends() {
+    const wrap = document.getElementById("spendingTrendsWrap");
+    if (!wrap) return;
+    const log = state.costLog || [];
+    const now = new Date();
+    const months = [];
+    for (let i = 5; i >= 0; i--) {
+      const d = new Date(now.getFullYear(), now.getMonth() - i, 1);
+      months.push(monthKey(d.toISOString().slice(0, 10)));
+    }
+    const totals = months.map(m => log.filter(c => monthKey(c.date) === m).reduce((sum, c) => sum + (parseFloat(c.amount) || 0), 0));
+    const max = Math.max(1, ...totals);
+    const barsHtml = months.map((m, i) => {
+      const [y, mo] = m.split("-");
+      const label = MONTH_NAMES[parseInt(mo, 10) - 1] || m;
+      return `
+        <div class="trend-row">
+          <span class="trend-label">${label}</span>
+          <div class="trend-bar-track"><div class="trend-bar-fill" style="width:${Math.round((totals[i] / max) * 100)}%;"></div></div>
+          <span class="trend-amount">$${totals[i].toFixed(0)}</span>
+        </div>`;
+    }).join("");
+
+    const thisMonth = months[months.length - 1];
+    const catTotals = {};
+    log.filter(c => monthKey(c.date) === thisMonth && c.category).forEach(c => {
+      catTotals[c.category] = (catTotals[c.category] || 0) + (parseFloat(c.amount) || 0);
+    });
+    const catKeys = Object.keys(catTotals).sort((a, b) => catTotals[b] - catTotals[a]);
+    const catHtml = catKeys.length ? `
+      <div class="trend-section-heading">This month by category</div>
+      ${catKeys.map(cat => `
+        <div class="shopping-item">
+          <span class="label">${escapeHtml(cat)}</span>
+          <span class="footnote" style="margin-left:auto;">$${catTotals[cat].toFixed(2)}</span>
+        </div>`).join("")}
+    ` : "";
+
+    wrap.innerHTML = `<div class="trend-section-heading">Last 6 months</div>${barsHtml}${catHtml}`;
   }
 
   // ---------------- Settings / preferences ----------------
@@ -1942,7 +2248,7 @@
     if (!restock || restock < 1) { alert("Default staple restock interval needs to be at least 1 day."); return; }
     if (!leftoverDays || leftoverDays < 1) { alert("Leftover shelf life needs to be at least 1 day."); return; }
 
-    state.settings = { expiringSoonDays: days, defaultLowStock: lowStock, defaultRestockDays: restock, darkTheme: !!state.settings.darkTheme, leftoverShelfLifeDays: leftoverDays };
+    state.settings = { expiringSoonDays: days, defaultLowStock: lowStock, defaultRestockDays: restock, darkTheme: !!state.settings.darkTheme, leftoverShelfLifeDays: leftoverDays, monthlyBudget: state.settings.monthlyBudget != null ? state.settings.monthlyBudget : null };
     logActivity("settings", `Updated preferences (expiring-soon: ${days}d, default low-stock: ${lowStock}, default restock: ${restock}d, leftover shelf life: ${leftoverDays}d)`);
     saveState();
     applyDefaultsToItemForm();
@@ -2337,7 +2643,7 @@
           barcode: null, staple: false, restockDays: null, lastRestocked: null,
           price: price || null
         });
-        if (price > 0) state.costLog.push({ id: uid(), date: new Date().toISOString().slice(0, 10), amount: price, note: name });
+        if (price > 0) state.costLog.push({ id: uid(), date: new Date().toISOString().slice(0, 10), amount: price, note: name, category: "Other" });
         count++;
       });
       if (count === 0) { alert("No items checked."); return; }
@@ -2578,9 +2884,13 @@
     recipeReadiness, haveMap, expiringSoonAcrossLocations, shoppingListCount,
     recipesUsingNames, renderDashboard,
     logConsumption, weeklyUsageRate, suggestedBuyQty, shoppingSections,
-    addLeftover, removeLeftover, activeLeftovers, urgentLeftovers, promptForLeftovers,
+    addLeftover, removeLeftover, wasteLeftover, activeLeftovers, urgentLeftovers, promptForLeftovers,
     computeNotifications, renderNotifications, dismissNotification, clearAllNotifications,
-    autoFillWeek, mealSlotLabel, eatLeftoverFromSlot
+    autoFillWeek, mealSlotLabel, eatLeftoverFromSlot,
+    logFoodWaste, foodWasteSince, wasteItem, renderFoodWaste,
+    ensureHouseholdMember, currentRole, setMemberRole, renderHouseholdMembers, applyRolePermissions,
+    pantryHealthScore, renderPantryHealthScore,
+    renderBudget, saveBudget, renderSpendingTrends
   };
 
   // ---------------- Full render ----------------
@@ -2600,6 +2910,8 @@
     renderActivityLog();
     renderSettingsForm();
     renderNotifications();
+    renderHouseholdMembers();
+    applyRolePermissions();
     applyDefaultsToItemForm();
     validateAddItemForm();
   }
@@ -2608,8 +2920,8 @@
     adjustQty, removeItem, editRecipe, deleteRecipe, setMeal, markRecipeCooked,
     toggleAutoChecked, toggleExtraChecked, removeExtra, toggleStaple, markRestocked,
     removeCostEntry, goToTab, goToAddItem, goToScan, goToFindMeals,
-    setInventoryFilter, cookRecipeNow, removeLeftover, eatLeftoverFromSlot, autoFillWeek,
-    dismissNotification, clearAllNotifications
+    setInventoryFilter, cookRecipeNow, removeLeftover, wasteLeftover, eatLeftoverFromSlot, autoFillWeek,
+    dismissNotification, clearAllNotifications, setMemberRole, wasteItem, pantryHealthScore
   };
 
   startAuthFlow();
