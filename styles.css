@@ -119,6 +119,7 @@ body {
     padding: 20px;
   }
   #printArea h1 { font-size: 1.4rem; margin: 0 0 4px; }
+  #printArea h2 { font-size: 1.15rem; margin: 20px 0 6px; border-top: 1px solid #ccc; padding-top: 10px; }
   #printArea h3 { margin: 16px 0 4px; font-size: 1rem; }
   #printArea ul { margin: 0; padding-left: 4px; list-style: none; }
   #printArea li { padding: 3px 0; font-size: 0.95rem; }
@@ -304,6 +305,17 @@ tr.expiring td.exp-cell { color: var(--terracotta-dark); font-weight: 700; }
 .quick-controls { display: flex; align-items: center; justify-content: space-between; }
 .quick-controls .count { font-size: 1.2rem; font-weight: 700; min-width: 32px; text-align: center; }
 
+/* Quick count, stacked by storage location */
+.quick-location-group { margin-bottom: 10px; }
+.quick-location-group .category-heading { padding-top: 8px; }
+.quick-location-group:first-child .category-heading { padding-top: 0; }
+
+/* Required-field validation on the Add Item form */
+.input-invalid {
+  border-color: var(--terracotta-dark) !important;
+  box-shadow: 0 0 0 2px rgba(193, 105, 79, 0.25);
+}
+
 .footnote { font-size: 0.78rem; color: var(--muted); margin-top: 8px; }
 
 .shopping-item {
@@ -423,18 +435,153 @@ select#pantrySelect { font-weight: 700; color: var(--sage-dark); }
   }
 }
 
-@media (max-width: 640px) {
-  table.responsive, thead.responsive, tbody.responsive, th.responsive, td.responsive, tr.responsive { display: block; }
-  #inventoryTableWrap table, #inventoryTableWrap thead, #inventoryTableWrap tbody, #inventoryTableWrap th, #inventoryTableWrap td, #inventoryTableWrap tr { display: block; }
-  #inventoryTableWrap thead { display: none; }
-  #inventoryTableWrap tr { margin-bottom: 10px; border: 1px solid var(--line); border-radius: 8px; padding: 6px; }
-  #inventoryTableWrap td { border: none; padding: 4px 8px; }
-  #inventoryTableWrap td::before {
-    content: attr(data-label);
-    font-weight: 700;
-    color: var(--muted);
-    font-size: 0.7rem;
-    text-transform: uppercase;
-    display: block;
-  }
+/* Inventory, as filterable cards rather than a table */
+.filter-chips { display: flex; gap: 8px; flex-wrap: wrap; margin: 4px 0 4px; }
+.filter-chip {
+  padding: 6px 14px;
+  border-radius: 999px;
+  border: 1px solid var(--line);
+  background: var(--card);
+  color: var(--muted);
+  font-size: 0.8rem;
+  font-weight: 600;
+  cursor: pointer;
 }
+.filter-chip.active { background: var(--sage); border-color: var(--sage); color: white; }
+
+.inv-card-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+  gap: 12px;
+  margin-top: 8px;
+  margin-bottom: 6px;
+}
+.inv-card { border: 1px solid var(--line); border-radius: 10px; padding: 12px; background: #FDFBF7; }
+.inv-card.low { border-color: var(--terracotta); }
+.inv-card.expiring { border-color: var(--terracotta-dark); }
+.inv-card-top { display: flex; justify-content: space-between; align-items: flex-start; gap: 8px; }
+.inv-card-name { font-weight: 700; font-size: 0.9rem; }
+.inv-card-meta { font-size: 0.78rem; color: var(--muted); margin-top: 4px; }
+.inv-card-loc { font-weight: 600; }
+
+/* Notification bell + dropdown panel, in the header */
+.notif-wrap { position: relative; }
+#notifBell { position: relative; }
+.notif-badge {
+  position: absolute;
+  top: -6px;
+  right: -6px;
+  background: var(--terracotta);
+  color: white;
+  font-size: 0.65rem;
+  font-weight: 700;
+  min-width: 16px;
+  height: 16px;
+  border-radius: 999px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0 3px;
+  line-height: 1;
+}
+.notif-panel {
+  position: absolute;
+  right: 0;
+  top: calc(100% + 8px);
+  width: 300px;
+  max-height: 360px;
+  overflow-y: auto;
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  box-shadow: 0 6px 20px rgba(0,0,0,0.12);
+  padding: 8px;
+  z-index: 20;
+  text-align: left;
+}
+.notif-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 6px;
+  border-bottom: 1px solid var(--line);
+  font-size: 0.82rem;
+  cursor: pointer;
+}
+.notif-row:last-of-type { border-bottom: none; }
+.notif-row:hover { background: #F6F2E8; }
+.notif-row button { flex-shrink: 0; }
+
+/* Shopping list, grouped by priority instead of aisle */
+.shopping-section-heading {
+  font-weight: 700;
+  font-size: 0.82rem;
+  color: var(--sage-dark);
+  margin: 14px 0 6px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.shopping-section-heading:first-child { margin-top: 0; }
+
+/* Recipe readiness ("What can I make?") */
+.readiness-card {
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 12px 14px;
+  background: #FDFBF7;
+  margin-bottom: 12px;
+}
+.readiness-head { display: flex; justify-content: space-between; align-items: baseline; gap: 10px; }
+.readiness-name { font-weight: 700; font-size: 0.95rem; }
+.readiness-pct { font-size: 0.78rem; font-weight: 700; padding: 2px 8px; border-radius: 999px; }
+.readiness-pct.full { background: #EEF2ED; color: var(--sage-dark); }
+.readiness-pct.mid { background: #FBF1DE; color: #8C6420; }
+.readiness-pct.low { background: #FBEAE3; color: var(--terracotta-dark); }
+.readiness-bar { height: 6px; border-radius: 999px; background: var(--line); margin: 8px 0; overflow: hidden; }
+.readiness-bar-fill { height: 100%; background: var(--sage); border-radius: 999px; }
+.readiness-ing-list { list-style: none; margin: 8px 0 0; padding: 0; font-size: 0.84rem; }
+.readiness-ing-list li { display: flex; align-items: center; gap: 8px; padding: 3px 0; }
+.readiness-ing-list .dot { width: 8px; height: 8px; border-radius: 999px; background: var(--sage); flex-shrink: 0; }
+.readiness-ing-list li.missing .dot { background: var(--terracotta); }
+.readiness-ing-list li.missing { color: var(--terracotta-dark); }
+
+/* Dark theme — toggled from Settings; overrides the same custom properties + a handful of
+   hardcoded colors used for card-like backgrounds, pills, and buttons. */
+body.dark-theme {
+  --bg: #1B1C1E;
+  --card: #24262A;
+  --ink: #EDEDEF;
+  --muted: #A3A6AD;
+  --sage: #6FA37B;
+  --sage-dark: #8FCBA0;
+  --terracotta: #E08A6D;
+  --terracotta-dark: #F0A98A;
+  --amber: #E5B96A;
+  --line: #3A3C42;
+}
+body.dark-theme select,
+body.dark-theme input,
+body.dark-theme textarea { background: #2D2F34; color: var(--ink); border-color: var(--line); }
+body.dark-theme .quick-item,
+body.dark-theme .recipe-card,
+body.dark-theme .inv-card,
+body.dark-theme .readiness-card,
+body.dark-theme .auth-card { background: #2A2C31; }
+body.dark-theme .btn-secondary { background: #33353A; color: var(--ink); }
+body.dark-theme .btn-secondary:hover { background: #3D3F45; }
+body.dark-theme .btn-icon { background: #33353A; color: var(--ink); }
+body.dark-theme .filter-chip { background: #2A2C31; }
+body.dark-theme .pill { background: #223129; color: #9FD6AE; }
+body.dark-theme .pill.warn { background: #3A2A28; color: #F0A98A; }
+body.dark-theme .pill.amber { background: #3A331E; color: #E9C87C; }
+body.dark-theme .tab-btn { background: var(--card); color: var(--muted); }
+body.dark-theme .save-status { background: #223129; color: var(--sage-dark); }
+body.dark-theme .readiness-pct.full { background: #223129; }
+body.dark-theme .readiness-pct.mid { background: #3A331E; }
+body.dark-theme .readiness-pct.low { background: #3A2A28; }
+body.dark-theme th { color: var(--muted); }
+body.dark-theme .notif-panel { background: #24262A; }
+body.dark-theme .notif-row:hover { background: #2D2F34; }
+body.dark-theme .shopping-section-heading { color: var(--sage-dark); }

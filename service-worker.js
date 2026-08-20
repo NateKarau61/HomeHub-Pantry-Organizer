@@ -2,7 +2,7 @@
 // whatever was last loaded) without a signal. Anything from another origin — Firebase,
 // the barcode lookup API, the html5-qrcode CDN script — always goes straight to the network,
 // since that data needs to be live, not cached.
-const CACHE_NAME = "pantry-organizer-v2";
+const CACHE_NAME = "pantry-organizer-v4";
 const APP_SHELL = [
   "./",
   "./index.html",

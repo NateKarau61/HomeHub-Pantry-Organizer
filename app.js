@@ -12,20 +12,27 @@
   }
 
   function defaultSettings() {
-    return { expiringSoonDays: 7, defaultLowStock: 1, defaultRestockDays: 14 };
+    return { expiringSoonDays: 7, defaultLowStock: 1, defaultRestockDays: 14, darkTheme: false, leftoverShelfLifeDays: 4 };
+  }
+
+  function applyTheme() {
+    document.body.classList.toggle("dark-theme", !!(state.settings && state.settings.darkTheme));
   }
 
   function defaultState() {
     return {
       version: 4,
       pantries: { "Main Pantry": { items: [] } },
-      currentPantry: "Main Pantry",
+      currentPantry: "",
       recipes: [],
       mealPlan: {},
       shoppingExtras: [],
       shoppingAutoChecked: {},
       costLog: [],
       activityLog: [],
+      consumptionLog: [],
+      leftovers: [],
+      dismissedNotifications: {},
       settings: defaultSettings()
     };
   }
@@ -40,6 +47,9 @@
       shoppingAutoChecked: (raw && raw.shoppingAutoChecked) || {},
       costLog: (raw && raw.costLog) || [],
       activityLog: (raw && raw.activityLog) || [],
+      consumptionLog: (raw && raw.consumptionLog) || [],
+      leftovers: (raw && raw.leftovers) || [],
+      dismissedNotifications: (raw && raw.dismissedNotifications) || {},
       settings: Object.assign(defaultSettings(), (raw && raw.settings) || {})
     });
   }
@@ -184,6 +194,47 @@
     if (state.activityLog.length > 200) state.activityLog.length = 200;
   }
 
+  // ---------------- Consumption tracking ----------------
+  // A running record of how much of what got used, and how (cooking a recipe vs. tapping the
+  // "−" button by hand) — this powers the Dashboard's "Recently used" list and lets the shopping
+  // list suggest a buy quantity based on how fast something actually gets used, instead of just
+  // flagging that it's low.
+  function logConsumption(name, qty, unit, source) {
+    if (!name || !qty || qty <= 0) return;
+    state.consumptionLog = state.consumptionLog || [];
+    state.consumptionLog.unshift({ id: uid(), ts: Date.now(), name, qty, unit: unit || "", source });
+    if (state.consumptionLog.length > 300) state.consumptionLog.length = 300;
+  }
+
+  // Average amount of an item used per week, based on the last 28 days of consumption — 0 if
+  // there's not enough history yet. Matches by name the same way recipes/shopping do.
+  function weeklyUsageRate(name) {
+    const key = normName(name);
+    if (!key) return 0;
+    const cutoff = Date.now() - 28 * 86400000;
+    const total = (state.consumptionLog || [])
+      .filter(c => c.ts >= cutoff && normName(c.name) === key)
+      .reduce((sum, c) => sum + (parseFloat(c.qty) || 0), 0);
+    return total / 4;
+  }
+
+  function renderRecentlyUsed() {
+    const wrap = document.getElementById("dashboardRecentlyUsedWrap");
+    if (!wrap) return;
+    const recent = (state.consumptionLog || []).slice(0, 6);
+    if (recent.length === 0) {
+      wrap.innerHTML = '<p class="empty-note">Nothing used yet — cooking a recipe or adjusting a quantity down will show up here.</p>';
+      return;
+    }
+    wrap.innerHTML = recent.map(c => `
+      <div class="shopping-item">
+        <span class="label">${c.source === "cooked" ? "🍳" : "✋"} ${escapeHtml(c.name)}</span>
+        <span class="footnote" style="margin:0 8px 0 auto;">${c.qty}${c.unit ? " " + escapeHtml(c.unit) : ""}</span>
+        <span class="footnote" style="margin:0; white-space:nowrap;">${timeAgo(c.ts)}</span>
+      </div>
+    `).join("");
+  }
+
   function timeAgo(ts) {
     const diff = Math.max(0, Date.now() - ts);
     const mins = Math.round(diff / 60000);
@@ -241,12 +292,21 @@
     }
   }
 
+  // An intentionally blank selection ("") means "nothing chosen yet" and returns null —
+  // distinct from a stale/invalid reference (e.g. a location that got deleted), which still
+  // falls back to the first remaining location so existing data never breaks.
   function currentPantryData() {
+    if (state.currentPantry === "") return null;
     if (!state.pantries[state.currentPantry]) {
       const first = Object.keys(state.pantries)[0];
-      state.currentPantry = first;
+      state.currentPantry = first || "";
     }
+    if (state.currentPantry === "") return null;
     return state.pantries[state.currentPantry];
+  }
+
+  function escapeForInlineJs(str) {
+    return String(str == null ? "" : str).replace(/\\/g, "\\\\").replace(/'/g, "\\'").replace(/"/g, "&quot;");
   }
 
   function allItemsAcrossLocations() {
@@ -271,13 +331,39 @@
   function renderPantrySelect() {
     const sel = document.getElementById("pantrySelect");
     sel.innerHTML = "";
+    const blankOpt = document.createElement("option");
+    blankOpt.value = "";
+    blankOpt.textContent = "— choose a location —";
+    sel.appendChild(blankOpt);
     Object.keys(state.pantries).forEach(name => {
       const opt = document.createElement("option");
       opt.value = name;
       opt.textContent = name;
-      if (name === state.currentPantry) opt.selected = true;
       sel.appendChild(opt);
     });
+    // Reuses currentPantryData()'s fallback rules: a stale reference snaps to the first
+    // location, but an intentional blank ("") stays blank instead of auto-selecting one.
+    currentPantryData();
+    sel.value = state.currentPantry || "";
+  }
+
+  // ---------------- Print scope selector ----------------
+  function renderPrintScopeSelect() {
+    const sel = document.getElementById("printInventoryScope");
+    if (!sel) return;
+    const prevValue = sel.value;
+    sel.innerHTML = "";
+    const allOpt = document.createElement("option");
+    allOpt.value = "__all";
+    allOpt.textContent = "All locations";
+    sel.appendChild(allOpt);
+    Object.keys(state.pantries).forEach(name => {
+      const opt = document.createElement("option");
+      opt.value = name;
+      opt.textContent = name;
+      sel.appendChild(opt);
+    });
+    sel.value = (prevValue === "__all" || state.pantries[prevValue]) ? prevValue : "__all";
   }
 
   document.getElementById("pantrySelect").addEventListener("change", e => {
@@ -321,34 +407,53 @@
   });
 
   document.getElementById("removePantryBtn").addEventListener("click", () => {
+    if (!state.currentPantry) { alert("Choose a storage location first."); return; }
     const names = Object.keys(state.pantries);
     if (names.length <= 1) { alert("You need at least one storage location."); return; }
     if (!confirm(`Remove "${state.currentPantry}" and everything in it?`)) return;
     delete state.pantries[state.currentPantry];
-    state.currentPantry = Object.keys(state.pantries)[0];
+    state.currentPantry = ""; // require an explicit re-pick rather than silently landing on another location
     saveState();
     renderAll();
   });
 
   // ---------------- Tabs ----------------
-  const TAB_NAMES = ["inventory", "quick", "recipes", "mealplan", "shopping", "spending", "settings"];
-  document.querySelectorAll(".tab-btn").forEach(btn => {
-    btn.addEventListener("click", () => {
-      document.querySelectorAll(".tab-btn").forEach(b => b.classList.remove("active"));
-      btn.classList.add("active");
-      const tab = btn.dataset.tab;
-      TAB_NAMES.forEach(t => {
-        const el = document.getElementById("tab-" + t);
-        if (el) el.style.display = t === tab ? "" : "none";
-      });
-      if (tab === "quick") renderQuickCount();
-      if (tab === "recipes") { renderRecipeList(); renderCookNow(); }
-      if (tab === "mealplan") renderMealPlan();
-      if (tab === "shopping") renderShoppingList();
-      if (tab === "spending") renderSpending();
-      if (tab === "settings") { renderActivityLog(); renderSettingsForm(); }
+  const TAB_NAMES = ["dashboard", "inventory", "quick", "recipes", "mealplan", "shopping", "spending", "settings"];
+
+  function activateTab(tab) {
+    document.querySelectorAll(".tab-btn").forEach(b => b.classList.toggle("active", b.dataset.tab === tab));
+    TAB_NAMES.forEach(t => {
+      const el = document.getElementById("tab-" + t);
+      if (el) el.style.display = t === tab ? "" : "none";
     });
+    if (tab === "dashboard") renderDashboard();
+    if (tab === "quick") renderQuickCount();
+    if (tab === "recipes") { renderRecipeList(); renderCookNow(); }
+    if (tab === "mealplan") renderMealPlan();
+    if (tab === "shopping") renderShoppingList();
+    if (tab === "spending") renderSpending();
+    if (tab === "settings") { renderActivityLog(); renderSettingsForm(); }
+  }
+
+  document.querySelectorAll(".tab-btn").forEach(btn => {
+    btn.addEventListener("click", () => activateTab(btn.dataset.tab));
   });
+
+  // Lets the Dashboard's quick-action buttons (and anything else) jump straight to a tab
+  // and, for a couple of them, take a follow-up action once that tab is showing.
+  function goToTab(tab) { activateTab(tab); }
+  function goToAddItem() {
+    activateTab("inventory");
+    const el = document.getElementById("itemName");
+    if (el) { el.scrollIntoView({ behavior: "smooth", block: "center" }); el.focus(); }
+  }
+  function goToScan() {
+    activateTab("inventory");
+    openScanModal();
+  }
+  function goToFindMeals() {
+    activateTab("recipes");
+  }
 
   const undoToastBtn = document.getElementById("undoToastBtn");
   if (undoToastBtn) undoToastBtn.addEventListener("click", undoLastDelete);
@@ -360,6 +465,208 @@
     pendingUndo = null;
   });
 
+  // ---------------- In-app notifications ----------------
+  // A header-level bell so alerts are visible from any tab, not just the Dashboard. Built from
+  // the same helpers as the Dashboard/shopping list — no separate source of truth. Dismissing an
+  // alert hides it until its key is no longer active (e.g. the item gets restocked) and then
+  // reappears fresh if the same condition comes back later, rather than being gone forever.
+  function computeNotifications() {
+    const list = [];
+    lowStockItems().forEach(({ location, item }) => {
+      const qty = parseFloat(item.qty) || 0;
+      list.push({
+        key: "low:" + location + ":" + item.id,
+        text: `${qty <= 0 ? "Out of" : "Running low on"} ${item.name} (${location})`,
+        tab: "shopping"
+      });
+    });
+    stapleDueItems().forEach(({ location, item }) => {
+      list.push({ key: "staple:" + location + ":" + item.id, text: `Time to restock ${item.name} (${location})`, tab: "shopping" });
+    });
+    expiringSoonAcrossLocations().filter(e => e.daysLeft <= 2).forEach(({ location, item, daysLeft }) => {
+      const when = daysLeft < 0 ? "expired" : daysLeft === 0 ? "expires today" : `expires in ${daysLeft}d`;
+      list.push({ key: "expiring:" + location + ":" + item.id, text: `${item.name} ${when} (${location})`, tab: "inventory" });
+    });
+    activeLeftovers().forEach(lo => {
+      const d = daysUntil(lo.expiresOn);
+      if (d !== null && d <= 1) {
+        list.push({ key: "leftover:" + lo.id, text: `Leftover "${lo.name}" ${d < 0 ? "expired" : d === 0 ? "should be eaten today" : "expires tomorrow"}`, tab: "dashboard" });
+      }
+    });
+    return list;
+  }
+
+  function renderNotifications() {
+    const all = computeNotifications();
+    const activeKeys = new Set(all.map(n => n.key));
+    state.dismissedNotifications = state.dismissedNotifications || {};
+    // A dismissal only makes sense while its underlying alert is still active — once the
+    // condition's gone (restocked, used up, etc.) drop the dismissal so a future recurrence
+    // shows up fresh instead of staying silently hidden forever.
+    Object.keys(state.dismissedNotifications).forEach(k => { if (!activeKeys.has(k)) delete state.dismissedNotifications[k]; });
+    const visible = all.filter(n => !state.dismissedNotifications[n.key]);
+
+    const badge = document.getElementById("notifBadge");
+    if (badge) {
+      badge.textContent = String(visible.length);
+      badge.style.display = visible.length ? "" : "none";
+    }
+    const panel = document.getElementById("notifPanel");
+    if (!panel) return;
+    if (visible.length === 0) {
+      panel.innerHTML = '<p class="empty-note" style="padding:10px 12px;">You\'re all caught up.</p>';
+    } else {
+      panel.innerHTML = visible.map(n => `
+        <div class="notif-row" onclick="pantryApp.goToTab('${n.tab}')">
+          <span>${escapeHtml(n.text)}</span>
+          <button class="btn-icon" type="button" onclick="event.stopPropagation(); pantryApp.dismissNotification('${n.key}')">✕</button>
+        </div>
+      `).join("") + `<button class="btn-secondary" style="width:100%; margin-top:8px;" type="button" onclick="pantryApp.clearAllNotifications()">Dismiss all</button>`;
+    }
+  }
+
+  function dismissNotification(key) {
+    state.dismissedNotifications = state.dismissedNotifications || {};
+    state.dismissedNotifications[key] = true;
+    saveState();
+    renderNotifications();
+  }
+
+  function clearAllNotifications() {
+    state.dismissedNotifications = state.dismissedNotifications || {};
+    computeNotifications().forEach(n => { state.dismissedNotifications[n.key] = true; });
+    saveState();
+    renderNotifications();
+  }
+
+  const notifBellBtn = document.getElementById("notifBell");
+  if (notifBellBtn) notifBellBtn.addEventListener("click", e => {
+    e.stopPropagation();
+    const panel = document.getElementById("notifPanel");
+    if (panel) panel.style.display = panel.style.display === "none" ? "" : "none";
+  });
+  document.addEventListener("click", e => {
+    const panel = document.getElementById("notifPanel");
+    const bell = document.getElementById("notifBell");
+    if (!panel || panel.style.display === "none") return;
+    if (panel.contains(e.target) || (bell && bell.contains(e.target))) return;
+    panel.style.display = "none";
+  });
+
+  // ---------------- Dashboard ----------------
+  // A one-glance summary: status counts, what needs attention, top-ready recipes, this week's
+  // meal plan, and the shopping list size — all built from the same helpers the other tabs use,
+  // so there's no separate source of truth to keep in sync.
+  function renderDashboard() {
+    const greetingEl = document.getElementById("dashboardGreeting");
+    if (!greetingEl) return; // markup not present yet (shouldn't happen, but be defensive)
+
+    const hour = new Date().getHours();
+    const timeOfDay = hour < 12 ? "morning" : hour < 18 ? "afternoon" : "evening";
+    const rawName = currentUserLabel().split("@")[0] || "there";
+    greetingEl.textContent = `Good ${timeOfDay}, ${titleCaseWords(rawName.replace(/[._-]+/g, " "))}!`;
+
+    const allItems = allItemsAcrossLocations();
+    const low = lowStockItems();
+    const expiring = expiringSoonAcrossLocations();
+    const pricedTotal = allItems.reduce((sum, i) => sum + (i.price != null ? i.price * (parseFloat(i.qty) || 0) : 0), 0);
+    const hasAnyPriced = allItems.some(i => i.price != null);
+
+    const pillsWrap = document.getElementById("dashboardStatusPills");
+    if (pillsWrap) {
+      pillsWrap.innerHTML = `
+        <span class="pill">${allItems.length} item${allItems.length === 1 ? "" : "s"} in stock</span>
+        <span class="pill ${low.length ? "warn" : ""}">${low.length} low stock</span>
+        <span class="pill ${expiring.length ? "warn" : ""}">${expiring.length} expiring soon</span>
+        ${hasAnyPriced ? `<span class="pill amber">~$${pricedTotal.toFixed(2)} estimated value</span>` : ""}
+      `;
+    }
+
+    const attnWrap = document.getElementById("dashboardNeedsAttentionWrap");
+    if (attnWrap) {
+      // An item can be both expiring soon AND low stock (e.g. right at its threshold) — merge
+      // those into one row with both badges instead of listing the same item twice.
+      const merged = new Map(); // item.id -> { location, item, badges: [] }
+      expiring.forEach(({ location, item, daysLeft }) => {
+        const when = daysLeft < 0 ? "expired" : daysLeft === 0 ? "expires today" : daysLeft + "d left";
+        merged.set(item.id, { location, item, badges: [when] });
+      });
+      low.forEach(({ location, item }) => {
+        const entry = merged.get(item.id);
+        if (entry) entry.badges.push("low stock");
+        else merged.set(item.id, { location, item, badges: ["low stock"] });
+      });
+      const rows = Array.from(merged.values()).slice(0, 8).map(({ location, item, badges }) => `
+        <div class="shopping-item">
+          <span class="label">${escapeHtml(item.name)}</span>
+          ${badges.map(b => `<span class="pill warn">${escapeHtml(b)}</span>`).join("")}
+          <span class="footnote" style="margin:0 0 0 auto;">${escapeHtml(location)}</span>
+        </div>`);
+      const leftoverRows = urgentLeftovers().map(lo => {
+        const d = daysUntil(lo.expiresOn);
+        const when = d < 0 ? "expired" : "eat today";
+        return `
+        <div class="shopping-item">
+          <span class="label">🍱 ${escapeHtml(lo.name)} (leftovers)</span>
+          <span class="pill warn">${when}</span>
+          <button class="btn-danger" style="margin-left:auto;" onclick="pantryApp.removeLeftover('${lo.id}')">Used up</button>
+        </div>`;
+      });
+      let html = (rows.length || leftoverRows.length) ? rows.join("") + leftoverRows.join("") : '<p class="empty-note">Nothing needs attention right now.</p>';
+      if (expiring.length) {
+        const matchingRecipes = recipesUsingNames(expiring.map(e => e.item.name));
+        if (matchingRecipes.length) {
+          html += `<p class="footnote" style="margin-top:10px;">Recipes using items expiring soon: ${matchingRecipes.map(r => escapeHtml(r.name)).join(", ")}</p>`;
+        }
+      }
+      attnWrap.innerHTML = html;
+    }
+
+    const cookWrap = document.getElementById("dashboardCookNowPreview");
+    if (cookWrap) {
+      if (state.recipes.length === 0) {
+        cookWrap.innerHTML = '<p class="empty-note">Add a recipe to see how ready you are to make it.</p>';
+      } else {
+        const have = haveMap();
+        const ranked = state.recipes.filter(r => r.ingredients.length).map(r => recipeReadiness(r, have)).sort((a, b) => b.percent - a.percent).slice(0, 3);
+        cookWrap.innerHTML = ranked.length ? ranked.map(({ recipe, percent }) => `
+          <div class="shopping-item">
+            <span class="label">${escapeHtml(recipe.name)}</span>
+            <span class="pill ${percent === 100 ? "" : "amber"}" style="margin-left:auto;">${percent}% ready</span>
+          </div>
+        `).join("") : '<p class="empty-note">Add ingredients to a recipe to see how ready you are to make it.</p>';
+      }
+    }
+
+    const mealWrap = document.getElementById("dashboardMealPlanPreview");
+    if (mealWrap) {
+      const days = getDatesForOffset(0); // always "this week", regardless of the Meal plan tab's own navigation
+      const lines = [];
+      days.forEach((d, idx) => {
+        const key = formatDateKey(d);
+        const slot = state.mealPlan[key];
+        if (!slot) return;
+        const names = MEAL_SLOTS.map(s => slot[s]).filter(Boolean).map(mealSlotLabel).filter(Boolean);
+        if (names.length) lines.push(`<div class="shopping-item"><span class="label">${DAY_NAMES[idx]}</span><span class="footnote" style="margin:0 0 0 auto;">${names.map(n => escapeHtml(n)).join(", ")}</span></div>`);
+      });
+      mealWrap.innerHTML = lines.length ? lines.join("") : '<p class="empty-note">Nothing planned this week yet.</p>';
+    }
+
+    const shopWrap = document.getElementById("dashboardShoppingPreview");
+    if (shopWrap) {
+      const count = shoppingListCount();
+      shopWrap.innerHTML = `
+        <div class="shopping-item">
+          <span class="label">${count} item${count === 1 ? "" : "s"} on your shopping list</span>
+          <button class="btn-secondary" style="margin-left:auto;" type="button" onclick="pantryApp.goToTab('shopping')">Open shopping list</button>
+        </div>
+      `;
+    }
+
+    renderRecentlyUsed();
+    renderLeftovers();
+  }
+
   // ---------------- Inventory ----------------
   function daysUntil(dateStr) {
     if (!dateStr) return null;
@@ -369,9 +676,43 @@
     return Math.round((d - today) / 86400000);
   }
 
+  // Storage location, item name, category, quantity, unit, and low-stock number must all be
+  // filled in before an item can be added — nothing here defaults to a pre-filled value.
+  const ADD_ITEM_REQUIRED_FIELD_IDS = ["pantrySelect", "itemName", "itemCategory", "itemQty", "itemUnit", "itemThreshold"];
+
+  function fieldIsEmpty(el) {
+    if (!el) return true;
+    return String(el.value == null ? "" : el.value).trim() === "";
+  }
+
+  function validateAddItemForm() {
+    let allValid = true;
+    ADD_ITEM_REQUIRED_FIELD_IDS.forEach(id => {
+      const el = document.getElementById(id);
+      if (!el) return;
+      const empty = fieldIsEmpty(el);
+      el.classList.toggle("input-invalid", empty);
+      if (empty) allValid = false;
+    });
+    return allValid;
+  }
+
+  ADD_ITEM_REQUIRED_FIELD_IDS.forEach(id => {
+    const el = document.getElementById(id);
+    if (!el) return;
+    el.addEventListener("input", validateAddItemForm);
+    el.addEventListener("change", validateAddItemForm);
+  });
+
   function addItem() {
+    if (!validateAddItemForm()) {
+      alert("Fill in storage location, item name, category, quantity, unit, and low-stock number before adding an item.");
+      return;
+    }
+    const data = currentPantryData();
+    if (!data) { alert("Choose a storage location first."); return; }
+
     const name = document.getElementById("itemName").value.trim();
-    if (!name) { alert("Enter an item name."); return; }
     const category = document.getElementById("itemCategory").value;
     const qty = parseFloat(document.getElementById("itemQty").value) || 0;
     const unit = document.getElementById("itemUnit").value.trim();
@@ -391,7 +732,7 @@
       lastRestocked: staple ? new Date().toISOString().slice(0, 10) : null,
       price: (price != null && !isNaN(price)) ? price : null
     };
-    currentPantryData().items.push(newItem);
+    data.items.push(newItem);
 
     if (price != null && !isNaN(price) && price > 0) {
       state.costLog.push({ id: uid(), date: new Date().toISOString().slice(0, 10), amount: price, note: name });
@@ -399,10 +740,12 @@
 
     logActivity("add", `Added "${name}"${qty ? " ×" + qty : ""} to ${escapeHtml(state.currentPantry)}`);
 
+    // Storage location and category are left as-is (handy for adding several items of the
+    // same kind in a row); everything else clears and goes back to needing your input.
     document.getElementById("itemName").value = "";
-    document.getElementById("itemQty").value = "1";
+    document.getElementById("itemQty").value = "";
     document.getElementById("itemUnit").value = "";
-    document.getElementById("itemThreshold").value = String(state.settings.defaultLowStock);
+    document.getElementById("itemThreshold").value = "";
     document.getElementById("itemExpiry").value = "";
     document.getElementById("itemBarcode").value = "";
     if (stapleEl) stapleEl.checked = false;
@@ -414,39 +757,48 @@
   }
   document.getElementById("addItemBtn").addEventListener("click", addItem);
 
-  function removeItem(id) {
-    const data = currentPantryData();
+  // Takes an explicit location — Inventory cards can show items from any storage location at
+  // once now, not just whichever one is picked in "Add an item".
+  function removeItem(location, id) {
+    const data = state.pantries[location];
+    if (!data) return;
     const idx = data.items.findIndex(i => i.id === id);
     if (idx === -1) return;
     const removed = data.items[idx];
-    const locationName = state.currentPantry;
     data.items.splice(idx, 1);
-    logActivity("remove", `Removed "${removed.name}" from ${escapeHtml(locationName)}`);
+    logActivity("remove", `Removed "${removed.name}" from ${escapeHtml(location)}`);
     saveState();
     renderAll();
     showUndoToast(`Removed "${removed.name}".`, () => {
-      const pantry = state.pantries[locationName];
+      const pantry = state.pantries[location];
       if (pantry) {
         pantry.items.splice(Math.min(idx, pantry.items.length), 0, removed);
-        logActivity("undo", `Restored "${removed.name}" to ${escapeHtml(locationName)}`);
+        logActivity("undo", `Restored "${removed.name}" to ${escapeHtml(location)}`);
         saveState();
         renderAll();
       }
     });
   }
 
-  function adjustQty(id, delta) {
-    const data = currentPantryData();
+  // Takes an explicit location rather than assuming "whichever one is currently selected" —
+  // needed because Quick Count shows every location stacked at once, and this is called from
+  // whichever location's card the tap happened in.
+  function adjustQty(location, id, delta) {
+    const data = state.pantries[location];
+    if (!data) return;
     const item = data.items.find(i => i.id === id);
     if (!item) return;
-    item.qty = Math.max(0, (parseFloat(item.qty) || 0) + delta);
+    const before = parseFloat(item.qty) || 0;
+    item.qty = Math.max(0, before + delta);
     if (delta > 0 && item.staple) item.lastRestocked = new Date().toISOString().slice(0, 10);
+    if (delta < 0) logConsumption(item.name, before - item.qty, item.unit, "manual");
     saveState();
     renderAll();
   }
 
-  function toggleStaple(id) {
-    const data = currentPantryData();
+  function toggleStaple(location, id) {
+    const data = state.pantries[location];
+    if (!data) return;
     const item = data.items.find(i => i.id === id);
     if (!item) return;
     item.staple = !item.staple;
@@ -458,8 +810,11 @@
     renderAll();
   }
 
-  function markRestocked(id) {
-    const data = currentPantryData();
+  // Takes an explicit location because staple-due items on the shopping list can belong to
+  // any storage location, not just whichever one happens to be selected in the Inventory tab.
+  function markRestocked(location, id) {
+    const data = state.pantries[location];
+    if (!data) return;
     const item = data.items.find(i => i.id === id);
     if (!item) return;
     item.lastRestocked = new Date().toISOString().slice(0, 10);
@@ -467,90 +822,132 @@
     renderShoppingList();
   }
 
+  // "All" / "Low Stock" / "Expiring" / one chip per storage location. Not persisted — purely a
+  // display filter, independent from which location "Add an item" is pointed at.
+  let inventoryFilter = "all";
+
+  function setInventoryFilter(key) {
+    inventoryFilter = key;
+    renderInventory();
+  }
+
+  function renderInventoryFilterChips() {
+    const chipsWrap = document.getElementById("inventoryFilterChips");
+    if (!chipsWrap) return;
+    const chipDefs = [{ key: "all", label: "All" }, { key: "low", label: "Low Stock" }, { key: "expiring", label: "Expiring" }]
+      .concat(Object.keys(state.pantries).map(loc => ({ key: loc, label: loc })));
+    // A location that got deleted can't stay selected as a filter.
+    if (inventoryFilter !== "all" && inventoryFilter !== "low" && inventoryFilter !== "expiring" && !state.pantries[inventoryFilter]) {
+      inventoryFilter = "all";
+    }
+    chipsWrap.innerHTML = chipDefs.map(c => `<button type="button" class="filter-chip ${inventoryFilter === c.key ? "active" : ""}" onclick="pantryApp.setInventoryFilter('${escapeForInlineJs(c.key)}')">${escapeHtml(c.label)}</button>`).join("");
+  }
+
+  // Shows items across every storage location at once (filterable via the chips above), as
+  // cards rather than a table — the same tap +/- used in Quick Count works right on each card.
   function renderInventory() {
-    const data = currentPantryData();
-    const search = (document.getElementById("searchInput").value || "").toLowerCase();
+    renderInventoryFilterChips();
+
     const wrap = document.getElementById("inventoryTableWrap");
-    const filtered = data.items.filter(i => i.name.toLowerCase().includes(search));
-
     const subNote = document.getElementById("inventorySubNote");
-    if (subNote) subNote.textContent = `Items expiring within ${state.settings.expiringSoonDays} day${state.settings.expiringSoonDays === 1 ? "" : "s"} or at/below their low-stock number are flagged.`;
+    const search = (document.getElementById("searchInput").value || "").toLowerCase();
 
-    if (filtered.length === 0) {
-      wrap.innerHTML = '<p class="empty-note">No items yet. Add your first one above.</p>';
+    let items = allItemsAcrossLocations();
+    if (inventoryFilter === "low") {
+      items = items.filter(i => (parseFloat(i.qty) || 0) <= (parseFloat(i.threshold) || 0));
+    } else if (inventoryFilter === "expiring") {
+      items = items.filter(i => { const d = daysUntil(i.expiry); return d !== null && d <= state.settings.expiringSoonDays; });
+    } else if (inventoryFilter !== "all") {
+      items = items.filter(i => i.__location === inventoryFilter);
+    }
+    if (search) items = items.filter(i => i.name.toLowerCase().includes(search));
+
+    if (subNote) subNote.textContent = `Items expiring within ${state.settings.expiringSoonDays} day${state.settings.expiringSoonDays === 1 ? "" : "s"} or at/below their low-stock number are flagged. Showing ${items.length} item${items.length === 1 ? "" : "s"}.`;
+
+    if (items.length === 0) {
+      wrap.innerHTML = '<p class="empty-note">No items match this filter yet.</p>';
       return;
     }
 
     const byCategory = {};
-    filtered.forEach(item => {
+    items.forEach(item => {
       if (!byCategory[item.category]) byCategory[item.category] = [];
       byCategory[item.category].push(item);
     });
-
-    let html = "<table><thead><tr><th>Item</th><th>Qty</th><th>Unit</th><th>Expires</th><th></th></tr></thead><tbody>";
-
     const cats = CATEGORIES_ORDER.filter(c => byCategory[c]).concat(Object.keys(byCategory).filter(c => !CATEGORIES_ORDER.includes(c)));
 
-    cats.forEach(cat => {
-      html += `<tr><td colspan="5" class="category-heading">${escapeHtml(cat)}</td></tr>`;
-      byCategory[cat].forEach(item => {
-        const dLeft = daysUntil(item.expiry);
-        const isExpiring = dLeft !== null && dLeft <= state.settings.expiringSoonDays;
-        const isLow = item.qty <= item.threshold;
-        const rowClasses = [];
-        if (isLow) rowClasses.push("low-stock");
-        if (isExpiring) rowClasses.push("expiring");
-
-        let expText = item.expiry ? item.expiry : "—";
-        if (isExpiring) {
-          expText += dLeft < 0 ? ' <span class="pill warn">expired</span>' : ` <span class="pill warn">${dLeft}d left</span>`;
-        }
-
-        html += `<tr class="${rowClasses.join(" ")}">
-          <td data-label="Item">${escapeHtml(item.name)}${item.staple ? ' <span class="pill amber" title="Staple — restocks every ' + (item.restockDays || state.settings.defaultRestockDays) + ' days">★ staple</span>' : ""}</td>
-          <td data-label="Qty" class="qty-cell">${item.qty}${isLow ? ' <span class="pill warn">low</span>' : ""}</td>
-          <td data-label="Unit">${escapeHtml(item.unit || "—")}</td>
-          <td data-label="Expires" class="exp-cell">${expText}</td>
-          <td data-label="">
-            <button class="btn-icon" onclick="pantryApp.adjustQty('${item.id}', -1)">−</button>
-            <button class="btn-icon" onclick="pantryApp.adjustQty('${item.id}', 1)">+</button>
-            <button class="btn-icon" title="Toggle staple / recurring restock reminder" onclick="pantryApp.toggleStaple('${item.id}')">${item.staple ? "★" : "☆"}</button>
-            <button class="btn-danger" onclick="pantryApp.removeItem('${item.id}')">Remove</button>
-          </td>
-        </tr>`;
-      });
-    });
-
-    html += "</tbody></table>";
-    wrap.innerHTML = html;
+    wrap.innerHTML = cats.map(cat => `
+      <div class="category-heading">${escapeHtml(cat)}</div>
+      <div class="inv-card-grid">
+        ${byCategory[cat].map(item => {
+          const dLeft = daysUntil(item.expiry);
+          const isExpiring = dLeft !== null && dLeft <= state.settings.expiringSoonDays;
+          const isLow = (parseFloat(item.qty) || 0) <= (parseFloat(item.threshold) || 0);
+          const statusClass = isExpiring ? "expiring" : isLow ? "low" : "good";
+          const statusLabel = isExpiring ? (dLeft < 0 ? "Expired" : dLeft === 0 ? "Today" : dLeft + "d left") : isLow ? "Low" : "Good";
+          const loc = item.__location;
+          return `
+            <div class="inv-card ${statusClass}">
+              <div class="inv-card-top">
+                <span class="inv-card-name">${escapeHtml(item.name)}${item.staple ? " ★" : ""}</span>
+                <span class="pill ${statusClass === "good" ? "" : "warn"}">${statusLabel}</span>
+              </div>
+              <div class="inv-card-meta">${item.qty}${item.unit ? " " + escapeHtml(item.unit) : ""} · <span class="inv-card-loc">${escapeHtml(loc)}</span>${item.expiry ? " · exp " + escapeHtml(item.expiry) : ""}</div>
+              <div class="quick-controls" style="margin-top:10px;">
+                <button class="btn-icon" onclick="pantryApp.adjustQty('${escapeForInlineJs(loc)}', '${item.id}', -1)">−</button>
+                <span class="count">${item.qty}</span>
+                <button class="btn-icon" onclick="pantryApp.adjustQty('${escapeForInlineJs(loc)}', '${item.id}', 1)">+</button>
+              </div>
+              <div class="row" style="margin-top:8px;">
+                <button class="btn-icon" title="Toggle staple / recurring restock reminder" onclick="pantryApp.toggleStaple('${escapeForInlineJs(loc)}', '${item.id}')">${item.staple ? "★" : "☆"}</button>
+                <button class="btn-danger" onclick="pantryApp.removeItem('${escapeForInlineJs(loc)}', '${item.id}')">Remove</button>
+              </div>
+            </div>`;
+        }).join("")}
+      </div>
+    `).join("");
   }
 
   document.getElementById("searchInput").addEventListener("input", renderInventory);
 
   // ---------------- Quick count ----------------
+  // Shows every storage location stacked on top of each other (each with its own heading and
+  // its own tap +/- grid), rather than only whichever one is picked in "Add an item" — so this
+  // stays useful even before/without a location chosen there.
   function renderQuickCount() {
-    const data = currentPantryData();
-    const grid = document.getElementById("quickGrid");
+    const container = document.getElementById("quickGrid");
     const emptyNote = document.getElementById("quickEmptyNote");
+    const locations = Object.keys(state.pantries);
+    const nonEmptyLocations = locations.filter(loc => state.pantries[loc].items.length > 0);
 
-    if (data.items.length === 0) {
-      grid.innerHTML = "";
+    if (nonEmptyLocations.length === 0) {
+      container.innerHTML = "";
       emptyNote.style.display = "";
       return;
     }
     emptyNote.style.display = "none";
 
-    grid.innerHTML = data.items.map(item => `
-      <div class="quick-item">
-        <div class="name">${escapeHtml(item.name)}</div>
-        <div class="cat">${escapeHtml(item.category)}${item.unit ? " · " + escapeHtml(item.unit) : ""}</div>
-        <div class="quick-controls">
-          <button class="btn-icon" onclick="pantryApp.adjustQty('${item.id}', -1)">−</button>
-          <span class="count">${item.qty}</span>
-          <button class="btn-icon" onclick="pantryApp.adjustQty('${item.id}', 1)">+</button>
+    container.innerHTML = nonEmptyLocations.map(loc => {
+      const items = state.pantries[loc].items;
+      return `
+        <div class="quick-location-group">
+          <div class="category-heading">${escapeHtml(loc)}</div>
+          <div class="quick-grid">
+            ${items.map(item => `
+              <div class="quick-item">
+                <div class="name">${escapeHtml(item.name)}</div>
+                <div class="cat">${escapeHtml(item.category)}${item.unit ? " · " + escapeHtml(item.unit) : ""}</div>
+                <div class="quick-controls">
+                  <button class="btn-icon" onclick="pantryApp.adjustQty('${escapeForInlineJs(loc)}', '${item.id}', -1)">−</button>
+                  <span class="count">${item.qty}</span>
+                  <button class="btn-icon" onclick="pantryApp.adjustQty('${escapeForInlineJs(loc)}', '${item.id}', 1)">+</button>
+                </div>
+              </div>
+            `).join("")}
+          </div>
         </div>
-      </div>
-    `).join("");
+      `;
+    }).join("");
   }
 
   // ---------------- Recipes ----------------
@@ -747,20 +1144,165 @@
     });
   }
 
+  // A per-ingredient have/need breakdown plus an overall readiness percentage — the matching
+  // system behind both the Recipes tab and the Dashboard's "What can I make?" preview.
+  function recipeReadiness(recipe, have) {
+    const statuses = (recipe.ingredients || []).map(ing => {
+      const haveQty = Math.round((have[normName(ing.name)] || 0) * 100) / 100;
+      const needQty = ing.qty || 0;
+      let ok, missing;
+      if (!needQty) {
+        ok = haveQty > 0;
+        missing = null; // recipe didn't specify an amount, so we can't say how much is short
+      } else {
+        ok = haveQty >= needQty - 0.0001;
+        missing = ok ? 0 : Math.round((needQty - haveQty) * 100) / 100;
+      }
+      return { name: ing.name, unit: ing.unit, need: needQty, have: haveQty, ok, missing };
+    });
+    const total = statuses.length || 1;
+    const readyCount = statuses.filter(s => s.ok).length;
+    const percent = statuses.length ? Math.round((readyCount / total) * 100) : 0;
+    return { recipe, percent, statuses, readyCount, total: statuses.length };
+  }
+
   function renderCookNow() {
     const wrap = document.getElementById("cookNowWrap");
     if (!wrap) return;
     if (state.recipes.length === 0) {
-      wrap.innerHTML = '<p class="empty-note">Add some recipes below, and the ones you already have everything for will show up here.</p>';
+      wrap.innerHTML = '<p class="empty-note">Add some recipes below, and we\'ll show how ready you are to make each one.</p>';
       return;
     }
     const have = haveMap();
-    const makeable = state.recipes.filter(r => r.ingredients.length && canMakeRecipe(r, have));
-    if (makeable.length === 0) {
-      wrap.innerHTML = '<p class="empty-note">Nothing yet — recipes will show up here once you have every ingredient on hand.</p>';
+    const ranked = state.recipes
+      .filter(r => r.ingredients.length)
+      .map(r => recipeReadiness(r, have))
+      .sort((a, b) => b.percent - a.percent);
+
+    wrap.innerHTML = ranked.map(({ recipe, percent, statuses }) => `
+      <div class="readiness-card">
+        <div class="readiness-head">
+          <span class="readiness-name">${escapeHtml(recipe.name)}</span>
+          <span class="readiness-pct ${percent === 100 ? "full" : percent >= 50 ? "mid" : "low"}">${percent}% ready</span>
+        </div>
+        <div class="readiness-bar"><div class="readiness-bar-fill" style="width:${percent}%;"></div></div>
+        <ul class="readiness-ing-list">
+          ${statuses.map(s => `
+            <li class="${s.ok ? "ok" : "missing"}"><span class="dot"></span>${escapeHtml(s.name)}${s.ok ? " — have it" : (s.missing != null ? ` — need ${s.missing}${s.unit ? " " + escapeHtml(s.unit) : ""} more` : " — none on hand")}</li>
+          `).join("")}
+        </ul>
+        <button class="btn-primary" style="margin-top:8px;" type="button" onclick="pantryApp.cookRecipeNow('${recipe.id}')">🍳 Make it</button>
+      </div>
+    `).join("");
+  }
+
+  // Finds saved recipes that use any of the given ingredient names (case-insensitive) — used to
+  // surface "recipes using items expiring soon" on the Dashboard.
+  function recipesUsingNames(names) {
+    const keys = new Set(names.map(normName).filter(Boolean));
+    if (keys.size === 0) return [];
+    return state.recipes.filter(r => r.ingredients.some(ing => keys.has(normName(ing.name))));
+  }
+
+  // Subtracts a recipe's ingredients from pantry stock across all locations — shared by "Mark
+  // cooked" (from a meal-plan slot) and "Make it" (cooking a recipe straight from the list).
+  function subtractRecipeIngredients(recipe) {
+    recipe.ingredients.forEach(ing => {
+      let remaining = ing.qty || 0;
+      if (remaining <= 0) return;
+      let takenTotal = 0;
+      Object.keys(state.pantries).forEach(loc => {
+        if (remaining <= 0) return;
+        state.pantries[loc].items.forEach(item => {
+          if (remaining <= 0) return;
+          if (normName(item.name) !== normName(ing.name)) return;
+          const onHand = parseFloat(item.qty) || 0;
+          const take = Math.min(remaining, onHand);
+          item.qty = Math.max(0, onHand - take);
+          remaining -= take;
+          takenTotal += take;
+        });
+      });
+      if (takenTotal > 0) logConsumption(ing.name, takenTotal, ing.unit, "cooked");
+    });
+  }
+
+  function cookRecipeNow(id) {
+    const recipe = state.recipes.find(r => r.id === id);
+    if (!recipe) return;
+    if (!confirm(`Mark "${recipe.name}" as cooked? This will subtract its ingredients from your pantry inventory.`)) return;
+    subtractRecipeIngredients(recipe);
+    logActivity("cooked", `Marked "${recipe.name}" as cooked (Make it)`);
+    promptForLeftovers(recipe.name);
+    saveState();
+    renderAll();
+    alert(`Nice! Subtracted "${recipe.name}"'s ingredients from your pantry.`);
+  }
+
+  // ---------------- Leftovers ----------------
+  // A lightweight tracker for what's sitting in the fridge after cooking — separate from the
+  // main pantry inventory since leftovers aren't bought/restocked the same way, just eaten
+  // within a few days or tossed.
+  function addLeftover(name, portions) {
+    if (!name || !portions || portions <= 0) return;
+    const shelfDays = (state.settings && state.settings.leftoverShelfLifeDays) || 4;
+    const expires = new Date();
+    expires.setHours(0, 0, 0, 0);
+    expires.setDate(expires.getDate() + shelfDays);
+    state.leftovers = state.leftovers || [];
+    state.leftovers.push({
+      id: uid(), name, portions,
+      dateCooked: new Date().toISOString().slice(0, 10),
+      expiresOn: expires.toISOString().slice(0, 10)
+    });
+  }
+
+  function removeLeftover(id) {
+    state.leftovers = (state.leftovers || []).filter(l => l.id !== id);
+    saveState();
+    renderAll();
+  }
+
+  function activeLeftovers() {
+    return (state.leftovers || []).slice().sort((a, b) => (a.expiresOn || "").localeCompare(b.expiresOn || ""));
+  }
+
+  // After cooking, offer to save any leftover portions. Cancelling (or leaving it at 0) just
+  // skips this silently — leftovers are optional, not every meal has any.
+  function promptForLeftovers(recipeName) {
+    const raw = prompt(`Any leftovers from "${recipeName}"? Enter how many portions (0 if none).`, "0");
+    if (raw == null) return;
+    const portions = parseFloat(raw);
+    if (!portions || portions <= 0) return;
+    addLeftover(recipeName, portions);
+    logActivity("leftovers", `Saved ${portions} portion${portions === 1 ? "" : "s"} of "${recipeName}" as leftovers`);
+  }
+
+  function renderLeftovers() {
+    const wrap = document.getElementById("dashboardLeftoversWrap");
+    if (!wrap) return;
+    const list = activeLeftovers();
+    if (list.length === 0) {
+      wrap.innerHTML = '<p class="empty-note">No leftovers being tracked right now — saving some after cooking will show up here.</p>';
       return;
     }
-    wrap.innerHTML = makeable.map(r => `<span class="pill amber" style="margin:3px 6px 3px 0; font-size:0.85rem; padding:5px 12px;">🍳 ${escapeHtml(r.name)}</span>`).join("");
+    wrap.innerHTML = list.map(lo => {
+      const d = daysUntil(lo.expiresOn);
+      const when = d == null ? "" : d < 0 ? "expired" : d === 0 ? "eat today" : d + "d left";
+      return `
+        <div class="shopping-item">
+          <span class="label">🍱 ${escapeHtml(lo.name)}</span>
+          <span class="footnote" style="margin:0 8px;">${lo.portions} portion${lo.portions === 1 ? "" : "s"}</span>
+          <span class="pill ${d != null && d <= 1 ? "warn" : ""}">${when}</span>
+          <button class="btn-danger" style="margin-left:auto;" onclick="pantryApp.removeLeftover('${lo.id}')">Used up</button>
+        </div>`;
+    }).join("");
+  }
+
+  // Leftovers about to expire (or already expired) — folded into the Dashboard's "Needs
+  // attention" list right alongside pantry items so nothing about to go to waste is easy to miss.
+  function urgentLeftovers() {
+    return activeLeftovers().filter(lo => { const d = daysUntil(lo.expiresOn); return d !== null && d <= 1; });
   }
 
   // ---------------- Meal plan ----------------
@@ -779,9 +1321,12 @@
     return d.toISOString().slice(0, 10);
   }
 
-  function getWeekDates() {
+  // offset in weeks relative to the current week (0 = this week) — used directly by the meal
+  // plan's own week-navigation, and with a fixed 0 by the Dashboard's "This week" preview so it
+  // always shows the current week regardless of whatever week the Meal plan tab is browsing.
+  function getDatesForOffset(offset) {
     const monday = getMonday(new Date());
-    monday.setDate(monday.getDate() + weekOffset * 7);
+    monday.setDate(monday.getDate() + offset * 7);
     const days = [];
     for (let i = 0; i < 7; i++) {
       const d = new Date(monday);
@@ -791,9 +1336,25 @@
     return days;
   }
 
+  function getWeekDates() {
+    return getDatesForOffset(weekOffset);
+  }
+
   function ensureMealSlot(dateKey) {
     if (!state.mealPlan[dateKey]) state.mealPlan[dateKey] = { breakfast: null, lunch: null, dinner: null };
     return state.mealPlan[dateKey];
+  }
+
+  // A meal-plan slot value is either a recipe id or "leftover:<id>" — this resolves either to
+  // a display name, or null if it no longer points at anything (e.g. the leftover got eaten).
+  function mealSlotLabel(value) {
+    if (!value) return null;
+    if (typeof value === "string" && value.indexOf("leftover:") === 0) {
+      const lo = (state.leftovers || []).find(l => l.id === value.slice("leftover:".length));
+      return lo ? "🍱 " + lo.name : null;
+    }
+    const r = state.recipes.find(r => r.id === value);
+    return r ? r.name : null;
   }
 
   document.getElementById("prevWeekBtn").addEventListener("click", () => { weekOffset--; renderMealPlan(); });
@@ -812,16 +1373,26 @@
     const wrap = document.getElementById("mealGridWrap");
     let html = '<table class="meal-grid"><thead><tr><th>Day</th>' + MEAL_SLOTS.map(s => `<th>${MEAL_SLOT_LABELS[s]}</th>`).join("") + "</tr></thead><tbody>";
 
+    const leftovers = activeLeftovers();
+
     days.forEach((d, idx) => {
       const key = formatDateKey(d);
       const slot = ensureMealSlot(key);
       html += `<tr><td class="daycell" data-label="Day">${DAY_NAMES[idx]} ${d.getDate()}</td>`;
       MEAL_SLOTS.forEach(s => {
+        const value = slot[s];
+        const isLeftover = typeof value === "string" && value.indexOf("leftover:") === 0;
         html += `<td data-label="${MEAL_SLOT_LABELS[s]}"><select onchange="pantryApp.setMeal('${key}','${s}', this.value)">
           <option value="">—</option>
-          ${state.recipes.map(r => `<option value="${r.id}" ${slot[s] === r.id ? "selected" : ""}>${escapeHtml(r.name)}</option>`).join("")}
+          <optgroup label="Recipes">
+            ${state.recipes.map(r => `<option value="${r.id}" ${value === r.id ? "selected" : ""}>${escapeHtml(r.name)}</option>`).join("")}
+          </optgroup>
+          ${leftovers.length ? `<optgroup label="Leftovers">
+            ${leftovers.map(lo => `<option value="leftover:${lo.id}" ${value === "leftover:" + lo.id ? "selected" : ""}>🍱 ${escapeHtml(lo.name)}</option>`).join("")}
+          </optgroup>` : ""}
         </select>
-        ${slot[s] ? `<button class="btn-icon" style="margin-top:4px; font-size:0.75rem;" onclick="pantryApp.markRecipeCooked('${key}','${s}')">✓ Cooked</button>` : ""}
+        ${isLeftover ? `<button class="btn-icon" style="margin-top:4px; font-size:0.75rem;" onclick="pantryApp.eatLeftoverFromSlot('${key}','${s}')">🍽️ Ate it</button>`
+          : value ? `<button class="btn-icon" style="margin-top:4px; font-size:0.75rem;" onclick="pantryApp.markRecipeCooked('${key}','${s}')">✓ Cooked</button>` : ""}
         </td>`;
       });
       html += "</tr>";
@@ -834,6 +1405,49 @@
       wrap.innerHTML += '<p class="empty-note">Add a recipe first, then assign it to days here.</p>';
     }
   }
+
+  // Removes the leftover entry and clears it from this slot — the "Ate it" action for a
+  // leftover-assigned meal, parallel to "✓ Cooked" for a recipe-assigned one.
+  function eatLeftoverFromSlot(dateKey, slot) {
+    const s = ensureMealSlot(dateKey);
+    const value = s[slot];
+    if (typeof value !== "string" || value.indexOf("leftover:") !== 0) return;
+    const id = value.slice("leftover:".length);
+    const lo = (state.leftovers || []).find(l => l.id === id);
+    state.leftovers = (state.leftovers || []).filter(l => l.id !== id);
+    s[slot] = null;
+    logActivity("leftover-eaten", `Ate leftover "${lo ? lo.name : "?"}" (${MEAL_SLOT_LABELS[slot]}, ${dateKey})`);
+    saveState();
+    renderAll();
+  }
+
+  // Fills any empty slots this week with your most-ready-to-cook recipes, cycling through the
+  // top few so the week isn't just one recipe repeated — never overwrites a slot you already set.
+  function autoFillWeek() {
+    if (state.recipes.length === 0) { alert("Add a recipe first, then auto-fill can pick from them."); return; }
+    const have = haveMap();
+    const ranked = state.recipes.filter(r => r.ingredients.length).map(r => recipeReadiness(r, have)).sort((a, b) => b.percent - a.percent);
+    const pool = (ranked.length ? ranked : state.recipes.map(r => ({ recipe: r }))).slice(0, Math.min(5, Math.max(1, ranked.length || state.recipes.length))).map(r => r.recipe);
+    const days = getWeekDates();
+    let filled = 0, poolIdx = 0;
+    days.forEach(d => {
+      const key = formatDateKey(d);
+      const slot = ensureMealSlot(key);
+      MEAL_SLOTS.forEach(s => {
+        if (slot[s]) return;
+        slot[s] = pool[poolIdx % pool.length].id;
+        poolIdx++;
+        filled++;
+      });
+    });
+    if (filled === 0) { alert("This week's already fully planned!"); return; }
+    logActivity("mealplan-autofill", `Auto-filled ${filled} empty meal slot${filled === 1 ? "" : "s"} for the week of ${formatDateKey(days[0])}`);
+    saveState();
+    renderMealPlan();
+    alert(`Filled in ${filled} empty meal slot${filled === 1 ? "" : "s"} using your most-ready recipes.`);
+  }
+  const autoFillWeekBtn = document.getElementById("autoFillWeekBtn");
+  if (autoFillWeekBtn) autoFillWeekBtn.addEventListener("click", autoFillWeek);
 
   function setMeal(dateKey, slot, recipeId) {
     const s = ensureMealSlot(dateKey);
@@ -850,23 +1464,10 @@
     if (!recipe) return;
     if (!confirm(`Mark "${recipe.name}" as cooked? This will subtract its ingredients from your pantry inventory.`)) return;
 
-    recipe.ingredients.forEach(ing => {
-      let remaining = ing.qty || 0;
-      if (remaining <= 0) return;
-      Object.keys(state.pantries).forEach(loc => {
-        if (remaining <= 0) return;
-        state.pantries[loc].items.forEach(item => {
-          if (remaining <= 0) return;
-          if (normName(item.name) !== normName(ing.name)) return;
-          const onHand = parseFloat(item.qty) || 0;
-          const take = Math.min(remaining, onHand);
-          item.qty = Math.max(0, onHand - take);
-          remaining -= take;
-        });
-      });
-    });
+    subtractRecipeIngredients(recipe);
 
     logActivity("cooked", `Marked "${recipe.name}" as cooked (${MEAL_SLOT_LABELS[slot]}, ${dateKey})`);
+    promptForLeftovers(recipe.name);
     saveState();
     renderAll();
     alert(`Nice! Subtracted "${recipe.name}"'s ingredients from your pantry.`);
@@ -964,62 +1565,114 @@
     return out;
   }
 
-  function renderShoppingList() {
-    const wrap = document.getElementById("shoppingListWrap");
+  // Every item expiring within the configured window, across every storage location, soonest
+  // first — the "Use First" list on the Dashboard.
+  function expiringSoonAcrossLocations() {
+    const out = [];
+    Object.keys(state.pantries).forEach(loc => {
+      state.pantries[loc].items.forEach(item => {
+        const d = daysUntil(item.expiry);
+        if (d !== null && d <= state.settings.expiringSoonDays) out.push({ location: loc, item, daysLeft: d });
+      });
+    });
+    out.sort((a, b) => a.daysLeft - b.daysLeft);
+    return out;
+  }
+
+  // Same dedup rules used when rendering/printing/copying the shopping list, just as a count —
+  // used by the Dashboard's shopping-list preview.
+  function shoppingListCount() {
     const low = lowStockItems();
     const staples = stapleDueItems().filter(({ item }) => !low.some(l => l.item.id === item.id));
+    const extras = (state.shoppingExtras || []).filter(e => !e.checked);
+    return low.length + staples.length + extras.length;
+  }
+
+  // Suggested buy quantity based on the last 4 weeks of actual usage (see weeklyUsageRate) —
+  // falls back to 1 when there's not enough history yet.
+  function suggestedBuyQty(name) {
+    return Math.max(1, Math.round(weeklyUsageRate(name)) || 1);
+  }
+
+  function estimatedCost(item, qty) {
+    return (item && item.price != null && !isNaN(item.price)) ? item.price * qty : null;
+  }
+
+  // Splits the shopping-worthy items into priority buckets instead of just "low stock" — must
+  // buy (completely out), running low (some left but at/under threshold), and staple reminders
+  // (due for a restock regardless of count). Shared by the render, copy, and print paths so
+  // they can't drift out of sync with each other.
+  function shoppingSections() {
+    const low = lowStockItems();
+    const mustBuy = low.filter(({ item }) => (parseFloat(item.qty) || 0) <= 0);
+    const runningLow = low.filter(({ item }) => (parseFloat(item.qty) || 0) > 0);
+    const staples = stapleDueItems().filter(({ item }) => !low.some(l => l.item.id === item.id));
+    return { mustBuy, runningLow, staples };
+  }
+
+  function renderShoppingList() {
+    const wrap = document.getElementById("shoppingListWrap");
+    const totalsWrap = document.getElementById("shoppingTotalsWrap");
+    const { mustBuy, runningLow, staples } = shoppingSections();
     const extras = state.shoppingExtras || [];
 
-    if (low.length === 0 && staples.length === 0 && extras.length === 0) {
+    if (mustBuy.length === 0 && runningLow.length === 0 && staples.length === 0 && extras.length === 0) {
       wrap.innerHTML = '<p class="empty-note">Nothing needed right now. Low-stock pantry items and meal-plan needs will show up here automatically.</p>';
+      if (totalsWrap) totalsWrap.innerHTML = "";
       return;
     }
 
-    const groups = {};
-    function pushToGroup(cat, html) {
-      if (!groups[cat]) groups[cat] = [];
-      groups[cat].push(html);
-    }
+    let grandTotal = 0, anyPriced = false;
 
-    low.forEach(({ location, item }) => {
+    function trackedRow(location, item, badgeText, badgeClass) {
       const key = "lowstock:" + location + ":" + item.id;
       const checked = !!state.shoppingAutoChecked[key];
-      pushToGroup(item.category || "Other", `
+      const qty = suggestedBuyQty(item.name);
+      const cost = estimatedCost(item, qty);
+      if (cost != null) { grandTotal += cost; anyPriced = true; }
+      return `
         <div class="shopping-item ${checked ? "checked" : ""}">
           <input type="checkbox" ${checked ? "checked" : ""} onchange="pantryApp.toggleAutoChecked('${key}')">
           <span class="label">${escapeHtml(item.name)}${item.unit ? " (" + escapeHtml(item.unit) + ")" : ""}</span>
-          <span class="pill warn">low stock · ${escapeHtml(location)}</span>
-        </div>
-      `);
-    });
+          <span class="pill ${badgeClass}">${badgeText} · ${escapeHtml(location)}</span>
+          <span class="footnote" style="margin:0 0 0 8px; white-space:nowrap;">buy ~${qty}${cost != null ? " · $" + cost.toFixed(2) : ""}</span>
+        </div>`;
+    }
 
-    staples.forEach(({ location, item }) => {
-      pushToGroup(item.category || "Other", `
+    const mustBuyRows = mustBuy.map(({ location, item }) => trackedRow(location, item, "out of stock", "warn"));
+    const runningLowRows = runningLow.map(({ location, item }) => trackedRow(location, item, "running low", "amber"));
+    const stapleRows = staples.map(({ location, item }) => {
+      const qty = suggestedBuyQty(item.name);
+      const cost = estimatedCost(item, qty);
+      if (cost != null) { grandTotal += cost; anyPriced = true; }
+      return `
         <div class="shopping-item">
           <span class="label">${escapeHtml(item.name)}${item.unit ? " (" + escapeHtml(item.unit) + ")" : ""}</span>
           <span class="pill amber">restock reminder · ${escapeHtml(location)}</span>
-          <button class="btn-secondary" style="margin-left:auto;" onclick="pantryApp.markRestocked('${item.id}')">Mark restocked</button>
-        </div>
-      `);
+          <span class="footnote" style="margin:0 0 0 8px; white-space:nowrap;">${cost != null ? "~$" + cost.toFixed(2) : ""}</span>
+          <button class="btn-secondary" style="margin-left:auto;" onclick="pantryApp.markRestocked('${escapeForInlineJs(location)}', '${item.id}')">Mark restocked</button>
+        </div>`;
     });
+    const extraRows = extras.map(ex => `
+      <div class="shopping-item ${ex.checked ? "checked" : ""}">
+        <input type="checkbox" ${ex.checked ? "checked" : ""} onchange="pantryApp.toggleExtraChecked('${ex.id}')">
+        <span class="label">${escapeHtml(ex.label)}${ex.qty ? " — need " + ex.qty : ""}</span>
+        ${ex.source === "mealplan" ? '<span class="pill amber">from meal plan</span>' : ""}
+        <button class="btn-danger" style="margin-left:auto;" onclick="pantryApp.removeExtra('${ex.id}')">Remove</button>
+      </div>`);
 
-    extras.forEach(ex => {
-      pushToGroup(ex.category || "Other", `
-        <div class="shopping-item ${ex.checked ? "checked" : ""}">
-          <input type="checkbox" ${ex.checked ? "checked" : ""} onchange="pantryApp.toggleExtraChecked('${ex.id}')">
-          <span class="label">${escapeHtml(ex.label)}${ex.qty ? " — need " + ex.qty : ""}</span>
-          ${ex.source === "mealplan" ? '<span class="pill amber">from meal plan</span>' : ""}
-          <button class="btn-danger" style="margin-left:auto;" onclick="pantryApp.removeExtra('${ex.id}')">Remove</button>
-        </div>
-      `);
-    });
+    function section(title, icon, rows) {
+      if (rows.length === 0) return "";
+      return `<div class="shopping-section-heading">${icon} ${title} <span class="pill">${rows.length}</span></div>${rows.join("")}`;
+    }
 
-    const cats = CATEGORIES_ORDER.filter(c => groups[c]).concat(Object.keys(groups).filter(c => !CATEGORIES_ORDER.includes(c)));
+    wrap.innerHTML =
+      section("Must buy", "🔴", mustBuyRows) +
+      section("Running low", "🟡", runningLowRows) +
+      section("Staple reminders", "🔁", stapleRows) +
+      section("Added by you", "➕", extraRows);
 
-    wrap.innerHTML = cats.map(cat => `
-      <div class="category-heading">${escapeHtml(cat)}</div>
-      ${groups[cat].join("")}
-    `).join("");
+    if (totalsWrap) totalsWrap.innerHTML = anyPriced ? `<span class="pill amber">Estimated total: $${grandTotal.toFixed(2)}</span>` : "";
   }
 
   function toggleAutoChecked(key) {
@@ -1063,15 +1716,25 @@
   });
 
   document.getElementById("copyListBtn").addEventListener("click", () => {
-    const low = lowStockItems().filter(({ location, item }) => !state.shoppingAutoChecked["lowstock:" + location + ":" + item.id]);
-    const staples = stapleDueItems().filter(({ item }) => !low.some(l => l.item.id === item.id));
+    const { mustBuy, runningLow, staples } = shoppingSections();
+    const uncheckedMustBuy = mustBuy.filter(({ location, item }) => !state.shoppingAutoChecked["lowstock:" + location + ":" + item.id]);
+    const uncheckedRunningLow = runningLow.filter(({ location, item }) => !state.shoppingAutoChecked["lowstock:" + location + ":" + item.id]);
     const extras = (state.shoppingExtras || []).filter(e => !e.checked);
+    let total = 0, anyPriced = false;
+    function fmt(item) {
+      const qty = suggestedBuyQty(item.name);
+      const cost = estimatedCost(item, qty);
+      if (cost != null) { total += cost; anyPriced = true; }
+      return `- ${item.name}${item.unit ? " (" + item.unit + ")" : ""} — buy ~${qty}${cost != null ? ` ($${cost.toFixed(2)})` : ""}`;
+    }
     const lines = [
-      ...low.map(({ item }) => `- ${item.name}${item.unit ? " (" + item.unit + ")" : ""}`),
-      ...staples.map(({ item }) => `- ${item.name}${item.unit ? " (" + item.unit + ")" : ""} (staple restock)`),
+      ...uncheckedMustBuy.map(({ item }) => fmt(item) + " [must buy]"),
+      ...uncheckedRunningLow.map(({ item }) => fmt(item) + " [running low]"),
+      ...staples.map(({ item }) => fmt(item) + " [staple restock]"),
       ...extras.map(e => `- ${e.label}${e.qty ? " — need " + e.qty : ""}`)
     ];
     if (lines.length === 0) { alert("Your shopping list is empty."); return; }
+    if (anyPriced) lines.push(`\nEstimated total: $${total.toFixed(2)}`);
     const text = lines.join("\n");
     navigator.clipboard.writeText(text).then(() => {
       alert("Shopping list copied to clipboard.");
@@ -1081,78 +1744,96 @@
   });
 
   document.getElementById("printListBtn").addEventListener("click", () => {
-    const low = lowStockItems().filter(({ location, item }) => !state.shoppingAutoChecked["lowstock:" + location + ":" + item.id]);
-    const staples = stapleDueItems().filter(({ item }) => !low.some(l => l.item.id === item.id));
+    const { mustBuy, runningLow, staples } = shoppingSections();
     const extras = (state.shoppingExtras || []).filter(e => !e.checked);
 
-    if (low.length === 0 && staples.length === 0 && extras.length === 0) {
+    if (mustBuy.length === 0 && runningLow.length === 0 && staples.length === 0 && extras.length === 0) {
       alert("Your shopping list is empty — nothing to print.");
       return;
     }
 
-    const groups = {};
-    function pushToGroup(cat, text) {
-      if (!groups[cat]) groups[cat] = [];
-      groups[cat].push(text);
+    let total = 0, anyPriced = false;
+    function line(location, item, tag) {
+      const qty = suggestedBuyQty(item.name);
+      const cost = estimatedCost(item, qty);
+      if (cost != null) { total += cost; anyPriced = true; }
+      return `${escapeHtml(item.name)}${item.unit ? " (" + escapeHtml(item.unit) + ")" : ""} — ${escapeHtml(location)}, buy ~${qty}${cost != null ? ` ($${cost.toFixed(2)})` : ""}${tag ? " — " + tag : ""}`;
     }
-    low.forEach(({ location, item }) => {
-      pushToGroup(item.category || "Other", `${escapeHtml(item.name)}${item.unit ? " (" + escapeHtml(item.unit) + ")" : ""} — ${escapeHtml(location)}`);
-    });
-    staples.forEach(({ location, item }) => {
-      pushToGroup(item.category || "Other", `${escapeHtml(item.name)}${item.unit ? " (" + escapeHtml(item.unit) + ")" : ""} — restock reminder, ${escapeHtml(location)}`);
-    });
-    extras.forEach(ex => {
-      pushToGroup(ex.category || "Other", `${escapeHtml(ex.label)}${ex.qty ? " — need " + escapeHtml(String(ex.qty)) : ""}`);
-    });
 
-    const cats = CATEGORIES_ORDER.filter(c => groups[c]).concat(Object.keys(groups).filter(c => !CATEGORIES_ORDER.includes(c)));
+    const sections = [
+      { title: "Must buy", lines: mustBuy.map(({ location, item }) => line(location, item)) },
+      { title: "Running low", lines: runningLow.map(({ location, item }) => line(location, item)) },
+      { title: "Staple reminders", lines: staples.map(({ location, item }) => line(location, item, "restock reminder")) },
+      { title: "Added by you", lines: extras.map(ex => `${escapeHtml(ex.label)}${ex.qty ? " — need " + escapeHtml(String(ex.qty)) : ""}`) }
+    ].filter(s => s.lines.length);
+
     const dateStr = new Date().toLocaleDateString(undefined, { year: "numeric", month: "long", day: "numeric" });
 
     const printArea = document.getElementById("printArea");
     printArea.innerHTML = `
       <h1>🥫 Shopping List</h1>
       <p style="color:#555; margin:0 0 12px;">${dateStr}</p>
-      ${cats.map(cat => `
-        <h3>${escapeHtml(cat)}</h3>
+      ${sections.map(s => `
+        <h3>${escapeHtml(s.title)}</h3>
         <ul>
-          ${groups[cat].map(line => `<li>&#9744; ${line}</li>`).join("")}
+          ${s.lines.map(l => `<li>&#9744; ${l}</li>`).join("")}
         </ul>
       `).join("")}
+      ${anyPriced ? `<p><strong>Estimated total: $${total.toFixed(2)}</strong></p>` : ""}
     `;
 
     window.print();
   });
 
-  const printInventoryBtn = document.getElementById("printInventoryBtn");
-  if (printInventoryBtn) printInventoryBtn.addEventListener("click", () => {
-    const data = currentPantryData();
-    if (data.items.length === 0) { alert(`No items in "${state.currentPantry}" to print.`); return; }
-
+  function categoryBlocksHtml(items) {
     const byCategory = {};
-    data.items.forEach(item => {
+    items.forEach(item => {
       const cat = item.category || "Other";
       if (!byCategory[cat]) byCategory[cat] = [];
       byCategory[cat].push(item);
     });
     const cats = CATEGORIES_ORDER.filter(c => byCategory[c]).concat(Object.keys(byCategory).filter(c => !CATEGORIES_ORDER.includes(c)));
-    const dateStr = new Date().toLocaleDateString(undefined, { year: "numeric", month: "long", day: "numeric" });
+    return cats.map(cat => `
+      <h3>${escapeHtml(cat)}</h3>
+      <ul>
+        ${byCategory[cat].map(item => {
+          const qtyText = `${item.qty}${item.unit ? " " + escapeHtml(item.unit) : ""}`;
+          const expText = item.expiry ? " — exp " + escapeHtml(item.expiry) : "";
+          const stapleText = item.staple ? " (staple)" : "";
+          return `<li>${escapeHtml(item.name)} — ${qtyText}${expText}${stapleText}</li>`;
+        }).join("")}
+      </ul>
+    `).join("");
+  }
 
+  const printInventoryBtn = document.getElementById("printInventoryBtn");
+  if (printInventoryBtn) printInventoryBtn.addEventListener("click", () => {
+    const scopeSel = document.getElementById("printInventoryScope");
+    const scope = scopeSel ? scopeSel.value : "__all";
+    const dateStr = new Date().toLocaleDateString(undefined, { year: "numeric", month: "long", day: "numeric" });
     const printArea = document.getElementById("printArea");
-    printArea.innerHTML = `
-      <h1>🥫 ${escapeHtml(state.currentPantry)} — Inventory</h1>
-      <p style="color:#555; margin:0 0 12px;">${dateStr}</p>
-      ${cats.map(cat => `
-        <h3>${escapeHtml(cat)}</h3>
-        <ul>
-          ${byCategory[cat].map(item => {
-            const qtyText = `${item.qty}${item.unit ? " " + escapeHtml(item.unit) : ""}`;
-            const expText = item.expiry ? " — exp " + escapeHtml(item.expiry) : "";
-            const stapleText = item.staple ? " (staple)" : "";
-            return `<li>${escapeHtml(item.name)} — ${qtyText}${expText}${stapleText}</li>`;
-          }).join("")}
-        </ul>
-      `).join("")}
-    `;
+
+    if (scope === "__all") {
+      const locations = Object.keys(state.pantries);
+      const nonEmpty = locations.filter(loc => state.pantries[loc].items.length > 0);
+      if (nonEmpty.length === 0) { alert("There's nothing in any storage location to print."); return; }
+      printArea.innerHTML = `
+        <h1>🥫 Whole Inventory</h1>
+        <p style="color:#555; margin:0 0 12px;">${dateStr}</p>
+        ${nonEmpty.map(loc => `
+          <h2>${escapeHtml(loc)}</h2>
+          ${categoryBlocksHtml(state.pantries[loc].items)}
+        `).join("")}
+      `;
+    } else {
+      const data = state.pantries[scope];
+      if (!data || data.items.length === 0) { alert(`No items in "${scope}" to print.`); return; }
+      printArea.innerHTML = `
+        <h1>🥫 ${escapeHtml(scope)} — Inventory</h1>
+        <p style="color:#555; margin:0 0 12px;">${dateStr}</p>
+        ${categoryBlocksHtml(data.items)}
+      `;
+    }
 
     window.print();
   });
@@ -1225,8 +1906,10 @@
 
   // ---------------- Settings / preferences ----------------
   function applyDefaultsToItemForm() {
+    // These show as hints, not pre-filled values — low-stock and item quantity now have to be
+    // typed in before an item can be added (see validateAddItemForm).
     const thresholdEl = document.getElementById("itemThreshold");
-    if (thresholdEl && document.activeElement !== thresholdEl) thresholdEl.value = String(state.settings.defaultLowStock);
+    if (thresholdEl) thresholdEl.placeholder = String(state.settings.defaultLowStock);
     const restockDaysEl = document.getElementById("itemRestockDays");
     if (restockDaysEl) restockDaysEl.placeholder = String(state.settings.defaultRestockDays);
   }
@@ -1235,12 +1918,16 @@
     const daysEl = document.getElementById("settingExpiringSoonDays");
     const lowStockEl = document.getElementById("settingDefaultLowStock");
     const restockEl = document.getElementById("settingDefaultRestockDays");
+    const leftoverEl = document.getElementById("settingLeftoverShelfLifeDays");
+    const darkEl = document.getElementById("settingDarkTheme");
     if (!daysEl || !lowStockEl || !restockEl) return;
     // Don't clobber values while someone's actively editing the form (e.g. a sync landed mid-edit).
-    if (document.activeElement === daysEl || document.activeElement === lowStockEl || document.activeElement === restockEl) return;
+    if (document.activeElement === daysEl || document.activeElement === lowStockEl || document.activeElement === restockEl || document.activeElement === leftoverEl) return;
     daysEl.value = String(state.settings.expiringSoonDays);
     lowStockEl.value = String(state.settings.defaultLowStock);
     restockEl.value = String(state.settings.defaultRestockDays);
+    if (leftoverEl) leftoverEl.value = String(state.settings.leftoverShelfLifeDays);
+    if (darkEl) darkEl.checked = !!state.settings.darkTheme;
   }
 
   const saveSettingsBtn = document.getElementById("saveSettingsBtn");
@@ -1248,17 +1935,29 @@
     const days = parseFloat(document.getElementById("settingExpiringSoonDays").value);
     const lowStock = parseFloat(document.getElementById("settingDefaultLowStock").value);
     const restock = parseFloat(document.getElementById("settingDefaultRestockDays").value);
+    const leftoverEl = document.getElementById("settingLeftoverShelfLifeDays");
+    const leftoverDays = leftoverEl ? parseFloat(leftoverEl.value) : state.settings.leftoverShelfLifeDays;
     if (!days || days < 1) { alert("\"Flag items expiring within\" needs to be at least 1 day."); return; }
     if (lowStock == null || isNaN(lowStock) || lowStock < 0) { alert("Default low-stock number needs to be 0 or more."); return; }
     if (!restock || restock < 1) { alert("Default staple restock interval needs to be at least 1 day."); return; }
+    if (!leftoverDays || leftoverDays < 1) { alert("Leftover shelf life needs to be at least 1 day."); return; }
 
-    state.settings = { expiringSoonDays: days, defaultLowStock: lowStock, defaultRestockDays: restock };
-    logActivity("settings", `Updated preferences (expiring-soon: ${days}d, default low-stock: ${lowStock}, default restock: ${restock}d)`);
+    state.settings = { expiringSoonDays: days, defaultLowStock: lowStock, defaultRestockDays: restock, darkTheme: !!state.settings.darkTheme, leftoverShelfLifeDays: leftoverDays };
+    logActivity("settings", `Updated preferences (expiring-soon: ${days}d, default low-stock: ${lowStock}, default restock: ${restock}d, leftover shelf life: ${leftoverDays}d)`);
     saveState();
     applyDefaultsToItemForm();
     renderInventory();
     renderShoppingList();
     alert("Preferences saved.");
+  });
+
+  // The dark-theme toggle applies (and syncs) immediately — it's a cosmetic on/off switch with
+  // nothing to validate, unlike the numeric preferences above which need the Save button.
+  const settingDarkThemeEl = document.getElementById("settingDarkTheme");
+  if (settingDarkThemeEl) settingDarkThemeEl.addEventListener("change", e => {
+    state.settings.darkTheme = e.target.checked;
+    applyTheme();
+    saveState();
   });
 
   // ---------------- Backup / export / import / reset ----------------
@@ -1344,12 +2043,20 @@
     el.classList.toggle("scan-error", !!isError);
   }
 
+  function hideScanConfirm() {
+    const wrap = document.getElementById("scanConfirmWrap");
+    if (wrap) { wrap.style.display = "none"; wrap.innerHTML = ""; }
+    const reader = document.getElementById("qrReader");
+    if (reader) reader.style.display = "";
+  }
+
   function openScanModal() {
     if (typeof Html5Qrcode === "undefined") {
       alert("The barcode scanner couldn't load (no internet connection?). You can still add items by typing them in.");
       return;
     }
     document.getElementById("scanModal").style.display = "flex";
+    hideScanConfirm();
     setScanStatus("Starting camera…", false);
     document.getElementById("scanBtn").disabled = true;
 
@@ -1394,8 +2101,9 @@
       });
   }
 
-  function closeScanModal() {
-    document.getElementById("scanModal").style.display = "none";
+  // Stops the camera but leaves the modal open — used to pause while a confirm card is shown,
+  // as opposed to closeScanModal() which also hides the modal entirely.
+  function pauseScanner() {
     scannerRunning = false;
     const s = scanner;
     scanner = null;
@@ -1412,46 +2120,97 @@
     }
   }
 
+  function closeScanModal() {
+    document.getElementById("scanModal").style.display = "none";
+    pauseScanner();
+    hideScanConfirm();
+  }
+
+  // Scan → identify → confirm: nothing is added or incremented until you explicitly confirm it
+  // here, rather than the scan silently mutating your pantry the instant a barcode decodes.
+  function showScanConfirm(html, wireUp) {
+    pauseScanner();
+    const reader = document.getElementById("qrReader");
+    if (reader) reader.style.display = "none";
+    const wrap = document.getElementById("scanConfirmWrap");
+    if (!wrap) return;
+    wrap.style.display = "";
+    wrap.innerHTML = html;
+    const cancelBtn = document.getElementById("scanConfirmCancelBtn");
+    if (cancelBtn) cancelBtn.addEventListener("click", closeScanModal);
+    if (wireUp) wireUp();
+  }
+
   function handleScannedBarcode(code) {
-    // 1) If this barcode is already tracked in the current location, just bump its quantity.
+    // 1) If this barcode is already tracked in the current location, confirm before bumping it.
     const data = currentPantryData();
+    if (!data) {
+      closeScanModal();
+      alert("Choose a storage location in \"Add an item\" first, then scan again.");
+      return;
+    }
     const existing = data.items.find(i => i.barcode === code);
     if (existing) {
-      existing.qty = (parseFloat(existing.qty) || 0) + 1;
-      if (existing.staple) existing.lastRestocked = new Date().toISOString().slice(0, 10);
-      saveState();
-      renderAll();
-      closeScanModal();
-      alert(`Scanned "${existing.name}" — quantity is now ${existing.qty}.`);
+      showScanConfirm(`
+        <p class="sub" style="margin-top:0;">Already in your pantry</p>
+        <div style="font-weight:700; font-size:1.05rem;">${escapeHtml(existing.name)}</div>
+        <div class="footnote">Current quantity: ${existing.qty}${existing.unit ? " " + escapeHtml(existing.unit) : ""} in ${escapeHtml(state.currentPantry)}</div>
+        <div class="row" style="margin-top:14px;">
+          <button class="btn-primary" type="button" id="scanConfirmActionBtn">+1</button>
+          <button class="btn-secondary" type="button" id="scanConfirmCancelBtn">Cancel</button>
+        </div>
+      `, () => {
+        document.getElementById("scanConfirmActionBtn").addEventListener("click", () => {
+          existing.qty = (parseFloat(existing.qty) || 0) + 1;
+          if (existing.staple) existing.lastRestocked = new Date().toISOString().slice(0, 10);
+          logActivity("scan", `Scanned "${existing.name}" — quantity is now ${existing.qty}`);
+          saveState();
+          renderAll();
+          closeScanModal();
+        });
+      });
       return;
     }
 
-    // 2) New barcode: try to look up the product, then prefill the add-item form.
-    closeScanModal();
-    document.getElementById("itemBarcode").value = code;
-    document.getElementById("itemName").value = "";
-    flashSaveStatus("Looking up barcode " + code + "…");
-
+    // 2) New barcode: look it up, show what we found, and only hand off to the Add Item form
+    // (for final review) once you say to.
+    setScanStatus("Looking up barcode " + code + "…", false);
     fetch(OFF_LOOKUP_URL + encodeURIComponent(code) + ".json")
       .then(r => r.json())
-      .then(data => {
-        if (data && data.status === 1 && data.product) {
-          const p = data.product;
-          const name = p.product_name || p.generic_name || "";
-          if (name) document.getElementById("itemName").value = p.brands ? `${name} (${p.brands})` : name;
-          const guessed = guessCategoryFromTags(p.categories_tags);
-          if (guessed) document.getElementById("itemCategory").value = guessed;
-          flashSaveStatus(name ? `Found "${name}" — check the details and click Add item.` : `Barcode ${code} scanned — enter the name and click Add item.`);
+      .then(result => {
+        if (result && result.status === 1 && result.product) {
+          const p = result.product;
+          const rawName = p.product_name || p.generic_name || "";
+          const name = rawName ? (p.brands ? `${rawName} (${p.brands})` : rawName) : "";
+          showNewItemScanConfirm(code, name, guessCategoryFromTags(p.categories_tags));
         } else {
-          flashSaveStatus(`Barcode ${code} scanned but not found online — enter the name and click Add item.`);
+          showNewItemScanConfirm(code, "", null);
         }
       })
-      .catch(() => {
-        flashSaveStatus(`Barcode ${code} scanned (lookup unavailable) — enter the name and click Add item.`);
-      })
-      .finally(() => {
+      .catch(() => showNewItemScanConfirm(code, "", null));
+  }
+
+  function showNewItemScanConfirm(code, name, category) {
+    showScanConfirm(`
+      <p class="sub" style="margin-top:0;">New item — not in your pantry yet</p>
+      <div style="font-weight:700; font-size:1.05rem;">${name ? escapeHtml(name) : "Not found online"}</div>
+      ${category ? `<div class="footnote">Guessed aisle: ${escapeHtml(category)}</div>` : ""}
+      <div class="footnote">Barcode: ${escapeHtml(code)}</div>
+      <div class="row" style="margin-top:14px;">
+        <button class="btn-primary" type="button" id="scanConfirmActionBtn">Use this — fill in the form</button>
+        <button class="btn-secondary" type="button" id="scanConfirmCancelBtn">Cancel</button>
+      </div>
+    `, () => {
+      document.getElementById("scanConfirmActionBtn").addEventListener("click", () => {
+        document.getElementById("itemBarcode").value = code;
+        document.getElementById("itemName").value = name;
+        if (category) document.getElementById("itemCategory").value = category;
+        closeScanModal();
+        validateAddItemForm();
         document.getElementById("itemName").focus();
+        flashSaveStatus(name ? `"${name}" ready to review — check the details and click Add item.` : `Barcode ${code} scanned — enter the name and click Add item.`);
       });
+    });
   }
 
   document.getElementById("scanBtn").addEventListener("click", openScanModal);
@@ -1564,6 +2323,8 @@
 
     const addBtn = document.getElementById("addReceiptItemsBtn");
     if (addBtn) addBtn.addEventListener("click", () => {
+      const data = currentPantryData();
+      if (!data) { alert("Choose a storage location in \"Add an item\" first, then add these items."); return; }
       const rows = document.querySelectorAll("#receiptItemRows .row");
       let count = 0;
       rows.forEach(row => {
@@ -1571,7 +2332,7 @@
         const name = row.querySelector(".receipt-item-name").value.trim();
         const price = parseFloat(row.querySelector(".receipt-item-price").value) || 0;
         if (!name) return;
-        currentPantryData().items.push({
+        data.items.push({
           id: uid(), name, category: "Other", qty: 1, unit: "", threshold: 1, expiry: "",
           barcode: null, staple: false, restockDays: null, lastRestocked: null,
           price: price || null
@@ -1632,6 +2393,178 @@
   const receiptFileInput = document.getElementById("receiptFileInput");
   if (receiptFileInput) receiptFileInput.addEventListener("change", e => handleReceiptFile(e.target.files[0]));
 
+  // ---------------- Recipe upload / OCR autofill ----------------
+  // Reads a photographed/uploaded recipe with the same on-device OCR used for receipts, then
+  // fills in the "Add a recipe" form directly — that form already serves as the review step,
+  // so there's no separate checklist; just double-check what landed before saving.
+  const RECIPE_UNIT_WORDS = [
+    "cups", "cup", "tablespoons", "tablespoon", "tbsp", "teaspoons", "teaspoon", "tsp",
+    "ounces", "ounce", "oz", "pounds", "pound", "lbs", "lb", "grams", "gram", "g",
+    "kilograms", "kilogram", "kg", "milliliters", "milliliter", "ml", "liters", "liter", "l",
+    "cans", "can", "cloves", "clove", "slices", "slice", "pinches", "pinch", "dashes", "dash",
+    "packages", "package", "pkg", "sticks", "stick", "boxes", "box", "bunches", "bunch",
+    "heads", "head", "stalks", "stalk"
+  ];
+
+  function fractionToDecimal(raw) {
+    const s = (raw == null ? "" : String(raw)).trim();
+    if (!s) return null;
+    const mixed = s.match(/^(\d+)\s+(\d+)\s*\/\s*(\d+)$/);
+    if (mixed) {
+      const whole = parseFloat(mixed[1]), num = parseFloat(mixed[2]), den = parseFloat(mixed[3]);
+      return den ? whole + num / den : whole;
+    }
+    const frac = s.match(/^(\d+)\s*\/\s*(\d+)$/);
+    if (frac) {
+      const num = parseFloat(frac[1]), den = parseFloat(frac[2]);
+      return den ? num / den : null;
+    }
+    const n = parseFloat(s);
+    return isNaN(n) ? null : n;
+  }
+
+  // Parses one ingredient line, e.g. "1 1/2 cups Chopped onion" -> {name, qty, unit}.
+  function parseIngredientLine(rawLine) {
+    const line = (rawLine || "").replace(/^[-*••●‣]+\s*/, "").trim();
+    if (!line) return null;
+
+    let rest = line;
+    let qty = null;
+    const qtyMatch = rest.match(/^(\d+\s+\d+\s*\/\s*\d+|\d+\s*\/\s*\d+|\d+(?:\.\d+)?)\s*/);
+    if (qtyMatch) {
+      qty = fractionToDecimal(qtyMatch[1]);
+      rest = rest.slice(qtyMatch[0].length).trim();
+    }
+
+    let unit = "";
+    const unitRe = new RegExp("^(" + RECIPE_UNIT_WORDS.join("|") + ")\\.?\\s+", "i");
+    const unitMatch = rest.match(unitRe);
+    if (unitMatch) {
+      unit = unitMatch[1].toLowerCase();
+      rest = rest.slice(unitMatch[0].length).trim();
+    }
+    rest = rest.replace(/^of\s+/i, "").trim();
+
+    const name = rest ? titleCaseWords(rest) : titleCaseWords(line);
+    if (!name || name.replace(/[^a-zA-Z]/g, "").length < 2) return null;
+    return { name, qty, unit };
+  }
+
+  // Best-effort split of freeform OCR text into a name, servings, ingredient lines, and notes.
+  // Recipe layouts vary a lot from card to card and site to site, so this is a first draft only
+  // — nothing is saved until you review and click "Save recipe" yourself.
+  function parseRecipeText(text) {
+    const rawLines = (text || "").split(/\r?\n/).map(l => l.trim()).filter(Boolean);
+    if (rawLines.length === 0) return { name: "", servings: null, ingredients: [], notes: "" };
+
+    const ingredientsHeaderRe = /^ingredients\b/i;
+    const instructionsHeaderRe = /^(instructions|directions|method|steps|preparation)\b/i;
+    const servingsRe = /(\d+)\s*(?:servings?|people)\b|serves\s*:?\s*(\d+)/i;
+
+    let name = "";
+    let servings = null;
+    let section = "name"; // name -> ingredients -> instructions
+    const ingredientLines = [];
+    const noteLines = [];
+
+    rawLines.forEach(line => {
+      if (ingredientsHeaderRe.test(line)) { section = "ingredients"; return; }
+      if (instructionsHeaderRe.test(line)) { section = "instructions"; return; }
+
+      const servMatch = line.match(servingsRe);
+      if (servMatch && servings == null) {
+        servings = parseInt(servMatch[1] || servMatch[2], 10) || null;
+        if (line.replace(servingsRe, "").trim().length < 3) return; // the whole line was just the serving size
+      }
+
+      if (section === "name") {
+        if (!name) { name = line; }
+        else ingredientLines.push(line);
+        return;
+      }
+      if (section === "ingredients") {
+        // A long, sentence-like line is probably an instruction that drifted in without a
+        // header — treat it as a note instead of a (nonsensical) ingredient.
+        const wordCount = line.split(/\s+/).length;
+        if (wordCount > 12 && /[.!]$/.test(line)) { noteLines.push(line); return; }
+        ingredientLines.push(line);
+        return;
+      }
+      noteLines.push(line);
+    });
+
+    const ingredients = ingredientLines
+      .map(parseIngredientLine)
+      .filter(Boolean)
+      .map(ing => Object.assign({ category: guessCategoryFromTags([ing.name]) || "Other" }, ing));
+
+    return {
+      name: titleCaseWords(name || "Untitled recipe"),
+      servings,
+      ingredients,
+      notes: noteLines.join(" ").slice(0, 500)
+    };
+  }
+
+  function setRecipeUploadStatus(msg, isError) {
+    const el = document.getElementById("recipeUploadStatusMsg");
+    if (!el) return;
+    el.textContent = msg || "";
+    el.style.display = msg ? "" : "none";
+    el.classList.toggle("scan-error", !!isError);
+  }
+
+  function applyParsedRecipeToForm(parsed) {
+    editingRecipeId = null;
+    document.getElementById("recipeName").value = parsed.name || "";
+    document.getElementById("recipeServings").value = parsed.servings || "4";
+    document.getElementById("recipeNotes").value = parsed.notes || "";
+    const rows = document.getElementById("recipeIngredientRows");
+    rows.innerHTML = "";
+    if (parsed.ingredients.length === 0) {
+      rows.appendChild(ingredientRowTemplate());
+    } else {
+      parsed.ingredients.forEach(ing => rows.appendChild(ingredientRowTemplate(ing)));
+    }
+    document.getElementById("saveRecipeBtn").textContent = "Save recipe";
+    window.scrollTo({ top: document.getElementById("tab-recipes").offsetTop - 10, behavior: "smooth" });
+  }
+
+  function handleRecipeUploadFile(file) {
+    if (!file) return;
+    if (typeof Tesseract === "undefined") {
+      setRecipeUploadStatus("The recipe reader couldn't load (no internet connection?). You can still fill in the form by hand below.", true);
+      return;
+    }
+    setRecipeUploadStatus("Reading recipe… this can take up to 30 seconds, especially the first time.", false);
+
+    Tesseract.recognize(file, "eng")
+      .then(({ data }) => {
+        const parsed = parseRecipeText(data && data.text);
+        applyParsedRecipeToForm(parsed);
+        setRecipeUploadStatus(
+          parsed.ingredients.length
+            ? `Filled in the form from ${parsed.ingredients.length} ingredient line${parsed.ingredients.length === 1 ? "" : "s"} we found — double-check everything, especially quantities, before saving.`
+            : "Filled in what we could, but couldn't make out any ingredient lines — you'll need to add those by hand.",
+          false
+        );
+      })
+      .catch(err => {
+        setRecipeUploadStatus("Couldn't read that image: " + (err && err.message ? err.message : err), true);
+      });
+  }
+
+  const uploadRecipeBtn = document.getElementById("uploadRecipeBtn");
+  if (uploadRecipeBtn) uploadRecipeBtn.addEventListener("click", () => {
+    const input = document.getElementById("recipeFileInput");
+    if (input) input.click();
+  });
+  const recipeFileInput = document.getElementById("recipeFileInput");
+  if (recipeFileInput) recipeFileInput.addEventListener("change", e => {
+    handleRecipeUploadFile(e.target.files[0]);
+    e.target.value = "";
+  });
+
   // Test-only hooks: let automated tests exercise things that are hard to trigger for real
   // (a camera scan, OCR on an actual image, the passage of time for a restock reminder, etc).
   // Harmless in normal use — nothing here is ever called unless a test explicitly invokes it.
@@ -1639,12 +2572,23 @@
     handleScannedBarcode, guessCategoryFromTags,
     getState: () => state,
     renderAll, renderShoppingList, renderSpending, renderActivityLog, renderCookNow,
-    stapleDueItems, parseReceiptLines, renderReceiptReview, renderSettingsForm
+    stapleDueItems, parseReceiptLines, renderReceiptReview, renderSettingsForm,
+    validateAddItemForm, currentPantryData,
+    parseRecipeText, parseIngredientLine, fractionToDecimal,
+    recipeReadiness, haveMap, expiringSoonAcrossLocations, shoppingListCount,
+    recipesUsingNames, renderDashboard,
+    logConsumption, weeklyUsageRate, suggestedBuyQty, shoppingSections,
+    addLeftover, removeLeftover, activeLeftovers, urgentLeftovers, promptForLeftovers,
+    computeNotifications, renderNotifications, dismissNotification, clearAllNotifications,
+    autoFillWeek, mealSlotLabel, eatLeftoverFromSlot
   };
 
   // ---------------- Full render ----------------
   function renderAll() {
+    applyTheme();
     renderPantrySelect();
+    renderPrintScopeSelect();
+    renderDashboard();
     renderInventory();
     renderQuickCount();
     renderRecipeList();
@@ -1655,13 +2599,17 @@
     renderSpending();
     renderActivityLog();
     renderSettingsForm();
+    renderNotifications();
     applyDefaultsToItemForm();
+    validateAddItemForm();
   }
 
   window.pantryApp = {
     adjustQty, removeItem, editRecipe, deleteRecipe, setMeal, markRecipeCooked,
     toggleAutoChecked, toggleExtraChecked, removeExtra, toggleStaple, markRestocked,
-    removeCostEntry
+    removeCostEntry, goToTab, goToAddItem, goToScan, goToFindMeals,
+    setInventoryFilter, cookRecipeNow, removeLeftover, eatLeftoverFromSlot, autoFillWeek,
+    dismissNotification, clearAllNotifications
   };
 
   startAuthFlow();
