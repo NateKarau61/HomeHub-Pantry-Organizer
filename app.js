@@ -6,6 +6,34 @@
   const MEAL_SLOTS = ["breakfast", "lunch", "dinner"];
   const MEAL_SLOT_LABELS = { breakfast: "Breakfast", lunch: "Lunch", dinner: "Dinner" };
 
+  // ---------------- Physical storage organization ----------------
+  // Every storage location has a "kind" that decides which set of physical sub-locations
+  // (shelves/drawers/doors) it offers on the Organize tab. Picking a preset when adding a
+  // location sets this automatically; a custom-named location defaults to "Other" but can be
+  // changed on the Organize tab if it's really a fridge/freezer/pantry under a different name.
+  const PANTRY_KINDS = ["Pantry", "Refrigerator", "Freezer", "Other"];
+  const PRESET_TO_KIND = { Pantry: "Pantry", Freezer: "Freezer", Refrigerator: "Refrigerator", Garage: "Other", Basement: "Other", Cellar: "Other" };
+  const SUBLOCATIONS_BY_KIND = {
+    Refrigerator: ["Top Shelf", "Middle Shelf", "Bottom Shelf", "Left Door", "Right Door", "Crisper Drawer", "Deli Drawer"],
+    Freezer: ["Top Shelf", "Middle Shelf", "Bottom Shelf", "Door", "Drawer"],
+    Pantry: ["Shelf 1", "Shelf 2", "Shelf 3", "Cabinet", "Drawer"],
+    Other: ["Shelf 1", "Shelf 2", "Bin", "Drawer"]
+  };
+
+  function inferKindFromName(name) {
+    const n = (name || "").toLowerCase();
+    if (n.includes("freez")) return "Freezer";
+    if (n.includes("fridge") || n.includes("refrig")) return "Refrigerator";
+    if (n.includes("pantry") || n.includes("cellar")) return "Pantry";
+    return "Other";
+  }
+
+  function subLocationsFor(pantryName) {
+    const p = state.pantries[pantryName];
+    const kind = (p && p.kind) || inferKindFromName(pantryName);
+    return SUBLOCATIONS_BY_KIND[kind] || SUBLOCATIONS_BY_KIND.Other;
+  }
+
   let uidCounter = 1;
   function uid() {
     return "id_" + Date.now().toString(36) + "_" + (uidCounter++) + "_" + Math.random().toString(36).slice(2, 7);
@@ -22,7 +50,7 @@
   function defaultState() {
     return {
       version: 4,
-      pantries: { "Main Pantry": { items: [] } },
+      pantries: { "Main Pantry": { items: [], kind: "Pantry" } },
       currentPantry: "",
       recipes: [],
       mealPlan: {},
@@ -41,7 +69,7 @@
 
   function mergeIntoDefaultShape(raw) {
     const base = defaultState();
-    return Object.assign(base, raw, {
+    const merged = Object.assign(base, raw, {
       pantries: (raw && raw.pantries) || base.pantries,
       recipes: (raw && raw.recipes) || [],
       mealPlan: (raw && raw.mealPlan) || {},
@@ -56,6 +84,13 @@
       householdMembers: (raw && raw.householdMembers) || {},
       settings: Object.assign(defaultSettings(), (raw && raw.settings) || {})
     });
+    // Backfill a "kind" onto any pantry saved before physical-storage organizing existed —
+    // guessed from its name — so the Organize tab always has sub-locations to offer.
+    Object.keys(merged.pantries).forEach(name => {
+      const p = merged.pantries[name];
+      if (!p.kind || !SUBLOCATIONS_BY_KIND[p.kind]) p.kind = inferKindFromName(name);
+    });
+    return merged;
   }
 
   function loadLocalFallback() {
@@ -73,12 +108,31 @@
   let saveTimer = null;
 
   // ---------------- Firebase auth + sync ----------------
+  // Each household's pantry data lives in its own doc: households/{inviteCode}. A separate
+  // memberships/{email} doc maps a login to the household it belongs to, so many people can
+  // share one household (same as before) while different households stay fully isolated from
+  // each other. households/shared is the pre-multi-household doc from before this existed —
+  // see migrateLegacyHousehold() for how existing data moves over automatically.
   const HOUSEHOLD_COLLECTION = "households";
-  const HOUSEHOLD_DOC = "shared";
+  const MEMBERSHIP_COLLECTION = "memberships";
+  const LEGACY_HOUSEHOLD_DOC = "shared";
+  const INVITE_CODE_CHARS = "23456789ABCDEFGHJKMNPQRSTUVWXYZ"; // no 0/O, 1/I/L — easy to read aloud
   let fbAuth = null;
   let fbDb = null;
   let unsubscribeSnapshot = null;
   let applyingRemoteUpdate = false;
+  let currentHouseholdId = null;
+  let pendingSignupInviteCode = null;
+  // Bumped on every auth-state change; async household-resolution steps check this before
+  // acting so a fast logout/login-as-someone-else while resolution for the PREVIOUS login is
+  // still in flight can't let that stale resolution overwrite the new login's household.
+  let authGeneration = 0;
+
+  function generateInviteCode() {
+    let code = "";
+    for (let i = 0; i < 8; i++) code += INVITE_CODE_CHARS[Math.floor(Math.random() * INVITE_CODE_CHARS.length)];
+    return code;
+  }
 
   function flashSaveStatus(msg) {
     const el = document.getElementById("saveStatus");
@@ -114,7 +168,7 @@
 
   function attachHouseholdListener() {
     if (unsubscribeSnapshot) unsubscribeSnapshot();
-    const ref = fbDb.collection(HOUSEHOLD_COLLECTION).doc(HOUSEHOLD_DOC);
+    const ref = fbDb.collection(HOUSEHOLD_COLLECTION).doc(currentHouseholdId);
     unsubscribeSnapshot = ref.onSnapshot(
       snap => {
         applyingRemoteUpdate = true;
@@ -123,14 +177,15 @@
           renderAll();
           flashSaveStatus("Synced");
         } else {
-          // First person ever to log in — seed the shared household doc.
-          // If this browser already has local data (from before login existed), carry it over.
-          state = loadLocalFallback();
+          // Shouldn't normally happen — resolveHouseholdAndSync() always seeds the doc before
+          // pointing the listener at it — but guard against it anyway (e.g. the doc got deleted).
+          state = defaultState();
           ref.set(state).then(() => flashSaveStatus("Synced")).catch(() => flashSaveStatus("Couldn't sync — check your connection"));
           renderAll();
         }
         applyingRemoteUpdate = false;
         ensureHouseholdMember();
+        renderHouseholdInviteCard();
       },
       () => {
         flashSaveStatus("Sync error — check your connection");
@@ -141,17 +196,148 @@
   function saveState() {
     if (applyingRemoteUpdate) return; // don't echo back a write we're only applying locally
     clearTimeout(saveTimer);
+    // Capture which household (and which snapshot of state) this save is for right now —
+    // NOT when the debounce timer fires. Otherwise logging out and into a different account
+    // within the 300ms debounce window would write stale data to whatever household happens
+    // to be active a moment later, silently corrupting the wrong household's pantry.
+    const householdIdAtSchedule = currentHouseholdId;
+    const stateSnapshot = JSON.parse(JSON.stringify(state));
     saveTimer = setTimeout(() => {
-      if (!fbDb) return;
-      fbDb.collection(HOUSEHOLD_COLLECTION).doc(HOUSEHOLD_DOC).set(state)
+      if (!fbDb || !householdIdAtSchedule) return;
+      fbDb.collection(HOUSEHOLD_COLLECTION).doc(householdIdAtSchedule).set(stateSnapshot)
         .then(() => flashSaveStatus("Synced"))
         .catch(() => flashSaveStatus("Couldn't sync — check your connection"));
     }, 300);
   }
 
+  // Figures out which household this login belongs to, creating or migrating one if needed,
+  // then points the live listener at it. Order of checks for a brand-new login:
+  //   1. Already has a memberships/{email} doc? Use that household — this is the common case
+  //      for every login after the first.
+  //   2. Signed up with an invite code that points to a real household? Join it.
+  //   3. Does the old single-shared-household doc (households/shared) exist? This is an
+  //      existing user from before multi-household support — migrate their data into a new
+  //      household automatically rather than dropping them into an empty one, and register
+  //      every email already listed in that doc's members so the rest of the household lands
+  //      in the same migrated place as they log in over time. (Two people migrating at the
+  //      exact same moment could each spin up their own copy — an accepted, rare edge case;
+  //      see README.)
+  //   4. Otherwise this is genuinely brand new — start a fresh, empty household.
+  function resolveHouseholdAndSync(user, signupInviteCode, myGeneration) {
+    const email = user.email;
+    const membershipRef = fbDb.collection(MEMBERSHIP_COLLECTION).doc(email);
+    membershipRef.get().then(membershipSnap => {
+      if (myGeneration !== authGeneration) return; // a newer login/logout has since happened
+      if (membershipSnap.exists && membershipSnap.data() && membershipSnap.data().householdId) {
+        currentHouseholdId = membershipSnap.data().householdId;
+        attachHouseholdListener();
+        return;
+      }
+
+      const joinByCode = signupInviteCode
+        ? fbDb.collection(HOUSEHOLD_COLLECTION).doc(signupInviteCode).get()
+        : Promise.resolve(null);
+
+      joinByCode.then(codeSnap => {
+        if (myGeneration !== authGeneration) return;
+        if (codeSnap && codeSnap.exists) {
+          return membershipRef.set({ householdId: signupInviteCode }).then(() => {
+            if (myGeneration !== authGeneration) return;
+            currentHouseholdId = signupInviteCode;
+            attachHouseholdListener();
+          });
+        }
+        if (signupInviteCode) {
+          flashSaveStatus("Invite code not found — starting a new household instead");
+        }
+        return migrateLegacyOrCreateHousehold(email, membershipRef, myGeneration);
+      }).catch(err => {
+        console.error(err);
+        flashSaveStatus("Couldn't set up your household — check your connection");
+      });
+    }).catch(err => {
+      console.error(err);
+      flashSaveStatus("Couldn't load your household — check your connection");
+    });
+  }
+
+  function migrateLegacyOrCreateHousehold(email, membershipRef, myGeneration) {
+    return fbDb.collection(HOUSEHOLD_COLLECTION).doc(LEGACY_HOUSEHOLD_DOC).get().then(legacySnap => {
+      if (myGeneration !== authGeneration) return;
+      if (legacySnap.exists) {
+        const legacyData = legacySnap.data();
+        const newId = generateInviteCode();
+        return fbDb.collection(HOUSEHOLD_COLLECTION).doc(newId).set(legacyData).then(() => {
+          const members = Object.keys((legacyData && legacyData.householdMembers) || {});
+          if (members.indexOf(email) === -1) members.push(email);
+          return Promise.all(members.map(m => fbDb.collection(MEMBERSHIP_COLLECTION).doc(m).set({ householdId: newId }))).then(() => {
+            if (myGeneration !== authGeneration) return;
+            currentHouseholdId = newId;
+            attachHouseholdListener();
+          });
+        });
+      }
+      // Truly brand new — no legacy data anywhere, start a fresh empty household. If this
+      // browser has old local-only data from before login existed, carry it over instead of
+      // discarding it.
+      const newId = generateInviteCode();
+      const seedState = loadLocalFallback();
+      return fbDb.collection(HOUSEHOLD_COLLECTION).doc(newId).set(seedState).then(() => {
+        return membershipRef.set({ householdId: newId }).then(() => {
+          if (myGeneration !== authGeneration) return;
+          currentHouseholdId = newId;
+          attachHouseholdListener();
+        });
+      });
+    });
+  }
+
+  function renderHouseholdInviteCard() {
+    const el = document.getElementById("householdInviteCodeDisplay");
+    if (el) el.value = currentHouseholdId || "";
+  }
+
+  function copyInviteCode() {
+    const statusEl = document.getElementById("copyInviteCodeStatus");
+    if (!currentHouseholdId) return;
+    const done = () => { if (statusEl) statusEl.textContent = "Copied!"; };
+    const fail = () => { if (statusEl) statusEl.textContent = "Couldn't copy — select and copy the code manually."; };
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(currentHouseholdId).then(done, fail);
+    } else {
+      fail();
+    }
+  }
+
+  // Switches this login to a different household by invite code. Used from Settings when
+  // someone signed up before getting the right code and wants to stop seeing their own
+  // (probably empty) household and start seeing the one they actually meant to join.
+  function joinDifferentHousehold(code) {
+    const statusEl = document.getElementById("joinHouseholdStatus");
+    const cleanCode = (code || "").trim().toUpperCase();
+    if (!cleanCode) { if (statusEl) statusEl.textContent = "Enter an invite code first."; return; }
+    if (!fbAuth || !fbAuth.currentUser) return;
+    const email = fbAuth.currentUser.email;
+    fbDb.collection(HOUSEHOLD_COLLECTION).doc(cleanCode).get().then(snap => {
+      if (!snap.exists) {
+        if (statusEl) statusEl.textContent = "That invite code doesn't match any household.";
+        return;
+      }
+      return fbDb.collection(MEMBERSHIP_COLLECTION).doc(email).set({ householdId: cleanCode }).then(() => {
+        currentHouseholdId = cleanCode;
+        attachHouseholdListener();
+        if (statusEl) statusEl.textContent = "Switched! You're now viewing that household's pantry.";
+      });
+    }).catch(err => {
+      console.error(err);
+      if (statusEl) statusEl.textContent = "Something went wrong — check your connection and try again.";
+    });
+  }
+
   function wireAuthUI() {
     document.getElementById("loginBtn").addEventListener("click", () => {
       hideAuthError();
+      pendingSignupInviteCode = null;
       const email = document.getElementById("authEmail").value.trim();
       const password = document.getElementById("authPassword").value;
       if (!email || !password) { showAuthError({ message: "Enter an email and password." }); return; }
@@ -162,12 +348,24 @@
       hideAuthError();
       const email = document.getElementById("authEmail").value.trim();
       const password = document.getElementById("authPassword").value;
+      const inviteCodeEl = document.getElementById("authInviteCode");
+      const inviteCode = inviteCodeEl ? inviteCodeEl.value.trim().toUpperCase() : "";
       if (!email || !password) { showAuthError({ message: "Enter an email and password." }); return; }
-      fbAuth.createUserWithEmailAndPassword(email, password).catch(showAuthError);
+      pendingSignupInviteCode = inviteCode || null;
+      fbAuth.createUserWithEmailAndPassword(email, password).catch(err => { pendingSignupInviteCode = null; showAuthError(err); });
     });
 
     document.getElementById("logoutBtn").addEventListener("click", () => {
       fbAuth.signOut();
+    });
+
+    const copyBtn = document.getElementById("copyInviteCodeBtn");
+    if (copyBtn) copyBtn.addEventListener("click", copyInviteCode);
+
+    const joinBtn = document.getElementById("joinHouseholdBtn");
+    if (joinBtn) joinBtn.addEventListener("click", () => {
+      const input = document.getElementById("joinHouseholdCodeInput");
+      joinDifferentHousehold(input ? input.value : "");
     });
   }
 
@@ -175,15 +373,20 @@
     wireAuthUI();
     if (!initFirebase()) return;
     fbAuth.onAuthStateChanged(user => {
+      authGeneration++;
+      const myGeneration = authGeneration;
       if (user) {
         document.getElementById("authScreen").style.display = "none";
         document.getElementById("appRoot").style.display = "";
         document.getElementById("loggedInAs").textContent = user.email;
-        attachHouseholdListener();
+        const inviteCode = pendingSignupInviteCode;
+        pendingSignupInviteCode = null;
+        resolveHouseholdAndSync(user, inviteCode, myGeneration);
       } else {
         document.getElementById("authScreen").style.display = "flex";
         document.getElementById("appRoot").style.display = "none";
         if (unsubscribeSnapshot) { unsubscribeSnapshot(); unsubscribeSnapshot = null; }
+        currentHouseholdId = null;
       }
     });
   }
@@ -305,7 +508,7 @@
       return;
     }
     wrap.innerHTML = recent.map(c => `
-      <div class="shopping-item">
+      <div class="shopping-item dash-click" title="Open Inventory" onclick="pantryApp.goToInventoryFilter('all')">
         <span class="label">${c.source === "cooked" ? "🍳" : "✋"} ${escapeHtml(c.name)}</span>
         <span class="footnote" style="margin:0 8px 0 auto;">${c.qty}${c.unit ? " " + escapeHtml(c.unit) : ""}</span>
         <span class="footnote" style="margin:0; white-space:nowrap;">${timeAgo(c.ts)}</span>
@@ -527,7 +730,8 @@
       : preset;
     if (!name) { alert("Pick a location or enter a custom name."); return; }
     if (pantryNameExists(name)) { alert("That location already exists."); return; }
-    state.pantries[name] = { items: [] };
+    const kind = preset === "__custom" ? inferKindFromName(name) : (PRESET_TO_KIND[preset] || "Other");
+    state.pantries[name] = { items: [], kind };
     state.currentPantry = name;
     document.getElementById("addPantryPanel").style.display = "none";
     saveState();
@@ -546,7 +750,7 @@
   });
 
   // ---------------- Tabs ----------------
-  const TAB_NAMES = ["dashboard", "inventory", "quick", "recipes", "mealplan", "shopping", "spending", "settings"];
+  const TAB_NAMES = ["dashboard", "inventory", "organize", "quick", "recipes", "mealplan", "shopping", "spending", "settings"];
 
   function activateTab(tab) {
     document.querySelectorAll(".tab-btn").forEach(b => b.classList.toggle("active", b.dataset.tab === tab));
@@ -555,12 +759,13 @@
       if (el) el.style.display = t === tab ? "" : "none";
     });
     if (tab === "dashboard") renderDashboard();
+    if (tab === "organize") renderOrganize();
     if (tab === "quick") renderQuickCount();
     if (tab === "recipes") { renderRecipeList(); renderCookNow(); }
     if (tab === "mealplan") renderMealPlan();
     if (tab === "shopping") renderShoppingList();
     if (tab === "spending") renderSpending();
-    if (tab === "settings") { renderActivityLog(); renderSettingsForm(); renderHouseholdMembers(); }
+    if (tab === "settings") { renderActivityLog(); renderSettingsForm(); renderHouseholdMembers(); renderHouseholdInviteCard(); }
   }
 
   document.querySelectorAll(".tab-btn").forEach(btn => {
@@ -570,6 +775,13 @@
   // Lets the Dashboard's quick-action buttons (and anything else) jump straight to a tab
   // and, for a couple of them, take a follow-up action once that tab is showing.
   function goToTab(tab) { activateTab(tab); }
+
+  // Jumps to Inventory pre-filtered — used by the Dashboard so its summary numbers are actual
+  // shortcuts to the matching filtered view, not just static counts.
+  function goToInventoryFilter(key) {
+    setInventoryFilter(key);
+    activateTab("inventory");
+  }
   function goToAddItem() {
     activateTab("inventory");
     const el = document.getElementById("itemName");
@@ -705,10 +917,10 @@
     return {
       score, label,
       breakdown: [
-        { label: "Stock levels", pct: Math.round(stockHealth * 100) },
-        { label: "Freshness", pct: Math.round(freshness * 100) },
-        { label: "Staples on schedule", pct: Math.round(stapleHealth * 100) },
-        { label: "Low waste", pct: Math.round(wasteHealth * 100) }
+        { label: "Stock levels", pct: Math.round(stockHealth * 100), onclick: "pantryApp.goToInventoryFilter('low')" },
+        { label: "Freshness", pct: Math.round(freshness * 100), onclick: "pantryApp.goToInventoryFilter('expiring')" },
+        { label: "Staples on schedule", pct: Math.round(stapleHealth * 100), onclick: "pantryApp.goToTab('shopping')" },
+        { label: "Low waste", pct: Math.round(wasteHealth * 100), onclick: "pantryApp.goToTab('spending')" }
       ]
     };
   }
@@ -724,7 +936,7 @@
         <span class="readiness-pct ${cls}">${escapeHtml(label)}</span>
       </div>
       <ul class="readiness-ing-list" style="margin-top:10px;">
-        ${breakdown.map(b => `<li class="${b.pct < 60 ? "missing" : ""}"><span class="dot"></span>${escapeHtml(b.label)} — ${b.pct}%</li>`).join("")}
+        ${breakdown.map(b => `<li class="dash-click ${b.pct < 60 ? "missing" : ""}" title="See more" onclick="${b.onclick}"><span class="dot"></span>${escapeHtml(b.label)} — ${b.pct}%</li>`).join("")}
       </ul>
     `;
   }
@@ -751,10 +963,10 @@
     const pillsWrap = document.getElementById("dashboardStatusPills");
     if (pillsWrap) {
       pillsWrap.innerHTML = `
-        <span class="pill">${allItems.length} item${allItems.length === 1 ? "" : "s"} in stock</span>
-        <span class="pill ${low.length ? "warn" : ""}">${low.length} low stock</span>
-        <span class="pill ${expiring.length ? "warn" : ""}">${expiring.length} expiring soon</span>
-        ${hasAnyPriced ? `<span class="pill amber">~$${pricedTotal.toFixed(2)} estimated value</span>` : ""}
+        <span class="pill dash-click" title="Open Inventory" onclick="pantryApp.goToInventoryFilter('all')">${allItems.length} item${allItems.length === 1 ? "" : "s"} in stock</span>
+        <span class="pill dash-click ${low.length ? "warn" : ""}" title="Open Inventory, filtered to low stock" onclick="pantryApp.goToInventoryFilter('low')">${low.length} low stock</span>
+        <span class="pill dash-click ${expiring.length ? "warn" : ""}" title="Open Inventory, filtered to expiring" onclick="pantryApp.goToInventoryFilter('expiring')">${expiring.length} expiring soon</span>
+        ${hasAnyPriced ? `<span class="pill dash-click amber" title="Open Spending" onclick="pantryApp.goToTab('spending')">~$${pricedTotal.toFixed(2)} estimated value</span>` : ""}
       `;
     }
 
@@ -773,7 +985,7 @@
         else merged.set(item.id, { location, item, badges: ["low stock"] });
       });
       const rows = Array.from(merged.values()).slice(0, 8).map(({ location, item, badges }) => `
-        <div class="shopping-item">
+        <div class="shopping-item dash-click" title="Open Inventory, filtered to ${escapeHtml(location)}" onclick="pantryApp.goToInventoryFilter('${escapeForInlineJs(location)}')">
           <span class="label">${escapeHtml(item.name)}</span>
           ${badges.map(b => `<span class="pill warn">${escapeHtml(b)}</span>`).join("")}
           <span class="footnote" style="margin:0 0 0 auto;">${escapeHtml(location)}</span>
@@ -807,7 +1019,7 @@
         const have = haveMap();
         const ranked = state.recipes.filter(r => r.ingredients.length).map(r => recipeReadiness(r, have)).sort((a, b) => b.percent - a.percent).slice(0, 3);
         cookWrap.innerHTML = ranked.length ? ranked.map(({ recipe, percent }) => `
-          <div class="shopping-item">
+          <div class="shopping-item dash-click" title="Open Recipes" onclick="pantryApp.goToFindMeals()">
             <span class="label">${escapeHtml(recipe.name)}</span>
             <span class="pill ${percent === 100 ? "" : "amber"}" style="margin-left:auto;">${percent}% ready</span>
           </div>
@@ -824,7 +1036,7 @@
         const slot = state.mealPlan[key];
         if (!slot) return;
         const names = MEAL_SLOTS.map(s => slot[s]).filter(Boolean).map(mealSlotLabel).filter(Boolean);
-        if (names.length) lines.push(`<div class="shopping-item"><span class="label">${DAY_NAMES[idx]}</span><span class="footnote" style="margin:0 0 0 auto;">${names.map(n => escapeHtml(n)).join(", ")}</span></div>`);
+        if (names.length) lines.push(`<div class="shopping-item dash-click" title="Open Meal plan" onclick="pantryApp.goToTab('mealplan')"><span class="label">${DAY_NAMES[idx]}</span><span class="footnote" style="margin:0 0 0 auto;">${names.map(n => escapeHtml(n)).join(", ")}</span></div>`);
       });
       mealWrap.innerHTML = lines.length ? lines.join("") : '<p class="empty-note">Nothing planned this week yet.</p>';
     }
@@ -903,10 +1115,13 @@
     const restockDays = staple ? (parseFloat(restockDaysEl && restockDaysEl.value) || state.settings.defaultRestockDays) : null;
     const priceEl = document.getElementById("itemPrice");
     const price = priceEl && priceEl.value ? parseFloat(priceEl.value) : null;
+    const notesEl = document.getElementById("itemNotes");
+    const notes = notesEl ? notesEl.value.trim() : "";
 
     const newItem = {
       id: uid(), name, category, qty, unit, threshold, expiry, barcode,
-      staple, restockDays,
+      staple, restockDays, notes,
+      subLocation: null,
       lastRestocked: staple ? new Date().toISOString().slice(0, 10) : null,
       price: (price != null && !isNaN(price)) ? price : null
     };
@@ -918,14 +1133,20 @@
 
     logActivity("add", `Added "${name}"${qty ? " ×" + qty : ""} to ${escapeHtml(state.currentPantry)}`);
 
-    // Storage location and category are left as-is (handy for adding several items of the
-    // same kind in a row); everything else clears and goes back to needing your input.
+    // Every field resets to blank after adding — including storage location and category —
+    // so the next item added always requires an intentional choice instead of silently
+    // inheriting the last one. This is deliberate: it's what stops "Milk → Refrigerator"
+    // followed by "Rice" from landing Rice in the Refrigerator by default. Physical placement
+    // within a location (which shelf/drawer) is handled afterward on the Organize tab, not here.
+    state.currentPantry = "";
     document.getElementById("itemName").value = "";
+    document.getElementById("itemCategory").value = "";
     document.getElementById("itemQty").value = "";
     document.getElementById("itemUnit").value = "";
     document.getElementById("itemThreshold").value = "";
     document.getElementById("itemExpiry").value = "";
     document.getElementById("itemBarcode").value = "";
+    if (notesEl) notesEl.value = "";
     if (stapleEl) stapleEl.checked = false;
     if (restockDaysEl) restockDaysEl.value = "";
     if (priceEl) priceEl.value = "";
@@ -986,6 +1207,131 @@
     });
   }
 
+  // ---------------- Edit Item modal ----------------
+  // Clicking an item's name in Current Inventory opens this instead of forcing a delete-and-
+  // recreate for something as simple as fixing a typo or correcting which shelf it's on.
+  let editingItemLocation = null;
+  let editingItemId = null;
+
+  function renderEditItemLocationSelect(selected) {
+    const sel = document.getElementById("editItemLocation");
+    if (!sel) return;
+    sel.innerHTML = Object.keys(state.pantries).map(name =>
+      `<option value="${escapeHtml(name)}" ${name === selected ? "selected" : ""}>${escapeHtml(name)}</option>`
+    ).join("");
+  }
+
+  function renderEditItemSubLocationSelect(location, selected) {
+    const sel = document.getElementById("editItemSubLocation");
+    if (!sel) return;
+    const subs = subLocationsFor(location);
+    sel.innerHTML = '<option value="">Unplaced</option>' +
+      subs.map(s => `<option value="${escapeHtml(s)}" ${s === selected ? "selected" : ""}>${escapeHtml(s)}</option>`).join("");
+  }
+
+  function openEditItem(location, id) {
+    const data = state.pantries[location];
+    if (!data) return;
+    const item = data.items.find(i => i.id === id);
+    if (!item) return;
+    editingItemLocation = location;
+    editingItemId = id;
+
+    document.getElementById("editItemName").value = item.name || "";
+    document.getElementById("editItemCategory").value = item.category || "";
+    document.getElementById("editItemQty").value = item.qty != null ? item.qty : "";
+    document.getElementById("editItemUnit").value = item.unit || "";
+    document.getElementById("editItemThreshold").value = item.threshold != null ? item.threshold : "";
+    document.getElementById("editItemExpiry").value = item.expiry || "";
+    document.getElementById("editItemPrice").value = item.price != null ? item.price : "";
+    document.getElementById("editItemNotes").value = item.notes || "";
+    document.getElementById("editItemStaple").checked = !!item.staple;
+    document.getElementById("editItemRestockDays").value = item.restockDays != null ? item.restockDays : "";
+
+    renderEditItemLocationSelect(location);
+    renderEditItemSubLocationSelect(location, item.subLocation || "");
+
+    document.getElementById("editItemModal").style.display = "flex";
+  }
+
+  function closeEditItemModal() {
+    const modal = document.getElementById("editItemModal");
+    if (modal) modal.style.display = "none";
+    editingItemLocation = null;
+    editingItemId = null;
+  }
+
+  const editItemLocationEl = document.getElementById("editItemLocation");
+  if (editItemLocationEl) editItemLocationEl.addEventListener("change", e => {
+    renderEditItemSubLocationSelect(e.target.value, "");
+  });
+
+  const closeEditItemBtn = document.getElementById("closeEditItemBtn");
+  if (closeEditItemBtn) closeEditItemBtn.addEventListener("click", closeEditItemModal);
+  const cancelEditItemBtn = document.getElementById("cancelEditItemBtn");
+  if (cancelEditItemBtn) cancelEditItemBtn.addEventListener("click", closeEditItemModal);
+
+  function saveEditItem() {
+    if (!editingItemLocation || !editingItemId) return;
+    const oldData = state.pantries[editingItemLocation];
+    if (!oldData) return;
+    const idx = oldData.items.findIndex(i => i.id === editingItemId);
+    if (idx === -1) return;
+    const item = oldData.items[idx];
+
+    const name = document.getElementById("editItemName").value.trim();
+    const category = document.getElementById("editItemCategory").value;
+    const qty = parseFloat(document.getElementById("editItemQty").value);
+    const unit = document.getElementById("editItemUnit").value.trim();
+    const threshold = parseFloat(document.getElementById("editItemThreshold").value);
+    const expiry = document.getElementById("editItemExpiry").value;
+    const priceRaw = document.getElementById("editItemPrice").value;
+    const notes = document.getElementById("editItemNotes").value.trim();
+    const staple = document.getElementById("editItemStaple").checked;
+    const restockDaysRaw = document.getElementById("editItemRestockDays").value;
+    const newLocation = document.getElementById("editItemLocation").value;
+    const subLocation = document.getElementById("editItemSubLocation").value || null;
+
+    if (!name) { alert("Item name can't be blank."); return; }
+    if (!category) { alert("Choose a category."); return; }
+    if (isNaN(qty) || qty < 0) { alert("Quantity needs to be 0 or more."); return; }
+    if (!unit) { alert("Unit can't be blank."); return; }
+    if (isNaN(threshold) || threshold < 0) { alert("Low-stock number needs to be 0 or more."); return; }
+    if (!newLocation || !state.pantries[newLocation]) { alert("Choose a storage location."); return; }
+
+    item.name = name;
+    item.category = category;
+    item.qty = qty;
+    item.unit = unit;
+    item.threshold = threshold;
+    item.expiry = expiry;
+    item.price = (priceRaw !== "" && !isNaN(parseFloat(priceRaw))) ? parseFloat(priceRaw) : null;
+    item.notes = notes;
+    item.subLocation = subLocation;
+    item.staple = staple;
+    if (staple) {
+      item.restockDays = restockDaysRaw ? parseFloat(restockDaysRaw) : (item.restockDays || state.settings.defaultRestockDays);
+      if (!item.lastRestocked) item.lastRestocked = new Date().toISOString().slice(0, 10);
+    } else {
+      item.restockDays = null;
+    }
+
+    if (newLocation !== editingItemLocation) {
+      oldData.items.splice(idx, 1);
+      state.pantries[newLocation].items.push(item);
+      logActivity("edit", `Edited "${item.name}" and moved it from ${escapeHtml(editingItemLocation)} to ${escapeHtml(newLocation)}`);
+    } else {
+      logActivity("edit", `Edited "${item.name}" in ${escapeHtml(newLocation)}`);
+    }
+
+    closeEditItemModal();
+    saveState();
+    renderAll();
+  }
+
+  const saveEditItemBtn = document.getElementById("saveEditItemBtn");
+  if (saveEditItemBtn) saveEditItemBtn.addEventListener("click", saveEditItem);
+
   // Takes an explicit location rather than assuming "whichever one is currently selected" —
   // needed because Quick Count shows every location stacked at once, and this is called from
   // whichever location's card the tap happened in.
@@ -1040,10 +1386,11 @@
   function renderInventoryFilterChips() {
     const chipsWrap = document.getElementById("inventoryFilterChips");
     if (!chipsWrap) return;
-    const chipDefs = [{ key: "all", label: "All" }, { key: "low", label: "Low Stock" }, { key: "expiring", label: "Expiring" }]
+    const chipDefs = [{ key: "all", label: "All" }, { key: "low", label: "Low Stock" }, { key: "expiring", label: "Expiring" }, { key: "outOfStock", label: "🚫 Out of Stock" }]
       .concat(Object.keys(state.pantries).map(loc => ({ key: loc, label: loc })));
     // A location that got deleted can't stay selected as a filter.
-    if (inventoryFilter !== "all" && inventoryFilter !== "low" && inventoryFilter !== "expiring" && !state.pantries[inventoryFilter]) {
+    const builtInFilters = ["all", "low", "expiring", "outOfStock"];
+    if (!builtInFilters.includes(inventoryFilter) && !state.pantries[inventoryFilter]) {
       inventoryFilter = "all";
     }
     chipsWrap.innerHTML = chipDefs.map(c => `<button type="button" class="filter-chip ${inventoryFilter === c.key ? "active" : ""}" onclick="pantryApp.setInventoryFilter('${escapeForInlineJs(c.key)}')">${escapeHtml(c.label)}</button>`).join("");
@@ -1059,16 +1406,26 @@
     const search = (document.getElementById("searchInput").value || "").toLowerCase();
 
     let items = allItemsAcrossLocations();
-    if (inventoryFilter === "low") {
-      items = items.filter(i => (parseFloat(i.qty) || 0) <= (parseFloat(i.threshold) || 0));
-    } else if (inventoryFilter === "expiring") {
-      items = items.filter(i => { const d = daysUntil(i.expiry); return d !== null && d <= state.settings.expiringSoonDays; });
-    } else if (inventoryFilter !== "all") {
-      items = items.filter(i => i.__location === inventoryFilter);
+    if (inventoryFilter === "outOfStock") {
+      // Out-of-stock items live in their own dedicated view — kept out of every other active
+      // filter below so the day-to-day inventory view isn't cluttered with empty slots. Nothing
+      // here is deleted; restocking (Quick Count, Organize, or the +) just brings it right back.
+      items = items.filter(i => (parseFloat(i.qty) || 0) <= 0);
+    } else {
+      items = items.filter(i => (parseFloat(i.qty) || 0) > 0);
+      if (inventoryFilter === "low") {
+        items = items.filter(i => (parseFloat(i.qty) || 0) <= (parseFloat(i.threshold) || 0));
+      } else if (inventoryFilter === "expiring") {
+        items = items.filter(i => { const d = daysUntil(i.expiry); return d !== null && d <= state.settings.expiringSoonDays; });
+      } else if (inventoryFilter !== "all") {
+        items = items.filter(i => i.__location === inventoryFilter);
+      }
     }
     if (search) items = items.filter(i => i.name.toLowerCase().includes(search));
 
-    if (subNote) subNote.textContent = `Items expiring within ${state.settings.expiringSoonDays} day${state.settings.expiringSoonDays === 1 ? "" : "s"} or at/below their low-stock number are flagged. Showing ${items.length} item${items.length === 1 ? "" : "s"}.`;
+    if (subNote) subNote.textContent = inventoryFilter === "outOfStock"
+      ? `Items at 0 quantity — restock with the + below and they'll move right back into your active inventory. Showing ${items.length} item${items.length === 1 ? "" : "s"}.`
+      : `Items expiring within ${state.settings.expiringSoonDays} day${state.settings.expiringSoonDays === 1 ? "" : "s"} or at/below their low-stock number are flagged. Out-of-stock items are tucked away under the "Out of Stock" chip instead of cluttering this view. Showing ${items.length} item${items.length === 1 ? "" : "s"}.`;
 
     if (items.length === 0) {
       wrap.innerHTML = '<p class="empty-note">No items match this filter yet.</p>';
@@ -1087,18 +1444,20 @@
       <div class="inv-card-grid">
         ${byCategory[cat].map(item => {
           const dLeft = daysUntil(item.expiry);
+          const isOut = (parseFloat(item.qty) || 0) <= 0;
           const isExpiring = dLeft !== null && dLeft <= state.settings.expiringSoonDays;
           const isLow = (parseFloat(item.qty) || 0) <= (parseFloat(item.threshold) || 0);
-          const statusClass = isExpiring ? "expiring" : isLow ? "low" : "good";
-          const statusLabel = isExpiring ? (dLeft < 0 ? "Expired" : dLeft === 0 ? "Today" : dLeft + "d left") : isLow ? "Low" : "Good";
+          const statusClass = isOut ? "expiring" : isExpiring ? "expiring" : isLow ? "low" : "good";
+          const statusLabel = isOut ? "Out of stock" : isExpiring ? (dLeft < 0 ? "Expired" : dLeft === 0 ? "Today" : dLeft + "d left") : isLow ? "Low" : "Good";
           const loc = item.__location;
           return `
             <div class="inv-card ${statusClass}">
               <div class="inv-card-top">
-                <span class="inv-card-name">${escapeHtml(item.name)}${item.staple ? " ★" : ""}</span>
+                <span class="inv-card-name dash-click" title="Edit item" onclick="pantryApp.openEditItem('${escapeForInlineJs(loc)}', '${item.id}')">${escapeHtml(item.name)}${item.staple ? " ★" : ""}</span>
                 <span class="pill ${statusClass === "good" ? "" : "warn"}">${statusLabel}</span>
               </div>
-              <div class="inv-card-meta">${item.qty}${item.unit ? " " + escapeHtml(item.unit) : ""} · <span class="inv-card-loc">${escapeHtml(loc)}</span>${item.expiry ? " · exp " + escapeHtml(item.expiry) : ""}</div>
+              <div class="inv-card-meta">${item.qty}${item.unit ? " " + escapeHtml(item.unit) : ""} · <span class="inv-card-loc">${escapeHtml(loc)}</span>${item.subLocation ? " · " + escapeHtml(item.subLocation) : ""}${item.expiry ? " · exp " + escapeHtml(item.expiry) : ""}</div>
+              ${item.notes ? `<div class="inv-card-meta" style="margin-top:2px;">📝 ${escapeHtml(item.notes)}</div>` : ""}
               <div class="quick-controls" style="margin-top:10px;">
                 <button class="btn-icon" onclick="pantryApp.adjustQty('${escapeForInlineJs(loc)}', '${item.id}', -1)">−</button>
                 <span class="count">${item.qty}</span>
@@ -1140,22 +1499,132 @@
         <div class="quick-location-group">
           <div class="category-heading">${escapeHtml(loc)}</div>
           <div class="quick-grid">
-            ${items.map(item => `
-              <div class="quick-item">
-                <div class="name">${escapeHtml(item.name)}</div>
-                <div class="cat">${escapeHtml(item.category)}${item.unit ? " · " + escapeHtml(item.unit) : ""}</div>
+            ${items.map(item => {
+              const outOfStock = (parseFloat(item.qty) || 0) <= 0;
+              return `
+              <div class="quick-item${outOfStock ? " out-of-stock" : ""}">
+                <div class="name">${escapeHtml(item.name)}${outOfStock ? ' <span class="pill warn" style="font-size:0.65rem; padding:2px 6px;">out of stock</span>' : ""}</div>
+                <div class="cat">${escapeHtml(item.category)}${item.unit ? " · " + escapeHtml(item.unit) : ""}${item.subLocation ? " · " + escapeHtml(item.subLocation) : ""}</div>
                 <div class="quick-controls">
                   <button class="btn-icon" onclick="pantryApp.adjustQty('${escapeForInlineJs(loc)}', '${item.id}', -1)">−</button>
                   <span class="count">${item.qty}</span>
-                  <button class="btn-icon" onclick="pantryApp.adjustQty('${escapeForInlineJs(loc)}', '${item.id}', 1)">+</button>
+                  <button class="btn-icon" onclick="pantryApp.adjustQty('${escapeForInlineJs(loc)}', '${item.id}', 1)">${outOfStock ? "+ Restock" : "+"}</button>
                 </div>
               </div>
-            `).join("")}
+            `; }).join("")}
           </div>
         </div>
       `;
     }).join("");
   }
+
+  // ---------------- Organize (physical storage placement) ----------------
+  // Not persisted — like the Inventory filter chips, this is just "which location am I looking
+  // at right now," defaulting to the first one that exists.
+  let organizeLocation = null;
+
+  function renderOrganizeLocationSelect() {
+    const sel = document.getElementById("organizeLocationSelect");
+    if (!sel) return;
+    const names = Object.keys(state.pantries);
+    if (!organizeLocation || !state.pantries[organizeLocation]) organizeLocation = names[0] || null;
+    sel.innerHTML = names.map(n => `<option value="${escapeHtml(n)}" ${n === organizeLocation ? "selected" : ""}>${escapeHtml(n)}</option>`).join("");
+  }
+
+  function setOrganizeLocation(name) {
+    organizeLocation = name;
+    renderOrganize();
+  }
+
+  function setOrganizeKind(kind) {
+    if (!organizeLocation || !state.pantries[organizeLocation]) return;
+    state.pantries[organizeLocation].kind = PANTRY_KINDS.includes(kind) ? kind : "Other";
+    logActivity("settings", `Set "${organizeLocation}" to organize like a ${state.pantries[organizeLocation].kind}`);
+    saveState();
+    renderOrganize();
+  }
+
+  // The one non-drag-and-drop "move" control: picking a new spot in this select immediately
+  // reassigns the item — reliable on both desktop and mobile, per the fallback the request itself
+  // called for if drag-and-drop wasn't the right tradeoff here.
+  function moveItemToSubLocation(location, id, subLocation) {
+    const data = state.pantries[location];
+    if (!data) return;
+    const item = data.items.find(i => i.id === id);
+    if (!item) return;
+    item.subLocation = subLocation || null;
+    logActivity("organize", `Moved "${item.name}" to ${subLocation ? escapeHtml(subLocation) : "Unplaced"} in ${escapeHtml(location)}`);
+    saveState();
+    renderOrganize();
+    renderInventory();
+  }
+
+  function renderOrganize() {
+    renderOrganizeLocationSelect();
+    const kindSel = document.getElementById("organizeKindSelect");
+    const wrap = document.getElementById("organizeWrap");
+    if (!wrap) return;
+    if (!organizeLocation || !state.pantries[organizeLocation]) {
+      wrap.innerHTML = '<p class="empty-note">Add a storage location in Inventory first, then come back here to organize what\'s in it.</p>';
+      return;
+    }
+    const data = state.pantries[organizeLocation];
+    const kind = PANTRY_KINDS.includes(data.kind) ? data.kind : inferKindFromName(organizeLocation);
+    if (kindSel) kindSel.value = kind;
+    const subs = SUBLOCATIONS_BY_KIND[kind] || SUBLOCATIONS_BY_KIND.Other;
+
+    const inStock = data.items.filter(i => (parseFloat(i.qty) || 0) > 0);
+    const outOfStock = data.items.filter(i => (parseFloat(i.qty) || 0) <= 0);
+    const unplaced = inStock.filter(i => !i.subLocation);
+
+    const moveSelectHtml = item => {
+      const options = ['<option value="">Unplaced</option>']
+        .concat(subs.map(s => `<option value="${escapeHtml(s)}" ${item.subLocation === s ? "selected" : ""}>${escapeHtml(s)}</option>`))
+        .join("");
+      return `<select onchange="pantryApp.moveItemToSubLocation('${escapeForInlineJs(organizeLocation)}', '${item.id}', this.value)">${options}</select>`;
+    };
+
+    const itemRowHtml = item => `
+      <div class="organize-item">
+        <span class="organize-item-name">${escapeHtml(item.name)}</span>
+        <span class="footnote" style="margin:0 8px 0 0; white-space:nowrap;">${item.qty}${item.unit ? " " + escapeHtml(item.unit) : ""}</span>
+        ${moveSelectHtml(item)}
+      </div>`;
+
+    let html = `
+      <div class="organize-box">
+        <div class="organize-box-heading">📥 Unplaced items</div>
+        ${unplaced.length ? unplaced.map(itemRowHtml).join("") : '<p class="empty-note">Nothing unplaced — everything here has a spot.</p>'}
+      </div>
+    `;
+    subs.forEach(sub => {
+      const here = inStock.filter(i => i.subLocation === sub);
+      html += `
+        <div class="organize-box">
+          <div class="organize-box-heading">${escapeHtml(sub)}</div>
+          ${here.length ? here.map(itemRowHtml).join("") : '<p class="empty-note">Empty.</p>'}
+        </div>
+      `;
+    });
+    html += `
+      <div class="organize-box out-of-stock">
+        <div class="organize-box-heading">🚫 Out of stock</div>
+        ${outOfStock.length ? outOfStock.map(item => `
+          <div class="organize-item">
+            <span class="organize-item-name">${escapeHtml(item.name)}</span>
+            <span class="footnote" style="margin:0 8px 0 0;">${item.subLocation ? "belongs on " + escapeHtml(item.subLocation) : "wasn't placed yet"}</span>
+            <button class="btn-secondary" style="margin-left:auto;" onclick="pantryApp.adjustQty('${escapeForInlineJs(organizeLocation)}', '${item.id}', 1)">+1 (restock)</button>
+          </div>
+        `).join("") : '<p class="empty-note">Nothing out of stock here.</p>'}
+      </div>
+    `;
+    wrap.innerHTML = html;
+  }
+
+  const organizeLocationSelectEl = document.getElementById("organizeLocationSelect");
+  if (organizeLocationSelectEl) organizeLocationSelectEl.addEventListener("change", e => setOrganizeLocation(e.target.value));
+  const organizeKindSelectEl = document.getElementById("organizeKindSelect");
+  if (organizeKindSelectEl) organizeKindSelectEl.addEventListener("change", e => setOrganizeKind(e.target.value));
 
   // ---------------- Recipes ----------------
   let editingRecipeId = null;
@@ -2890,7 +3359,11 @@
     logFoodWaste, foodWasteSince, wasteItem, renderFoodWaste,
     ensureHouseholdMember, currentRole, setMemberRole, renderHouseholdMembers, applyRolePermissions,
     pantryHealthScore, renderPantryHealthScore,
-    renderBudget, saveBudget, renderSpendingTrends
+    renderBudget, saveBudget, renderSpendingTrends,
+    openEditItem, closeEditItemModal, saveEditItem, subLocationsFor,
+    goToInventoryFilter, renderOrganize, setOrganizeLocation, setOrganizeKind, moveItemToSubLocation,
+    resolveHouseholdAndSync, migrateLegacyOrCreateHousehold, joinDifferentHousehold, copyInviteCode,
+    getCurrentHouseholdId: () => currentHouseholdId, generateInviteCode
   };
 
   // ---------------- Full render ----------------
@@ -2900,6 +3373,7 @@
     renderPrintScopeSelect();
     renderDashboard();
     renderInventory();
+    renderOrganize();
     renderQuickCount();
     renderRecipeList();
     renderCookNow();
@@ -2911,6 +3385,7 @@
     renderSettingsForm();
     renderNotifications();
     renderHouseholdMembers();
+    renderHouseholdInviteCard();
     applyRolePermissions();
     applyDefaultsToItemForm();
     validateAddItemForm();
@@ -2921,7 +3396,10 @@
     toggleAutoChecked, toggleExtraChecked, removeExtra, toggleStaple, markRestocked,
     removeCostEntry, goToTab, goToAddItem, goToScan, goToFindMeals,
     setInventoryFilter, cookRecipeNow, removeLeftover, wasteLeftover, eatLeftoverFromSlot, autoFillWeek,
-    dismissNotification, clearAllNotifications, setMemberRole, wasteItem, pantryHealthScore
+    dismissNotification, clearAllNotifications, setMemberRole, wasteItem, pantryHealthScore,
+    goToInventoryFilter, openEditItem, closeEditItemModal, saveEditItem,
+    setOrganizeLocation, setOrganizeKind, moveItemToSubLocation,
+    joinDifferentHousehold, copyInviteCode
   };
 
   startAuthFlow();

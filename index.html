@@ -32,11 +32,14 @@
     <label class="field" style="margin-top:10px;">Password
       <input type="password" id="authPassword" autocomplete="current-password">
     </label>
+    <label class="field" style="margin-top:10px;">Household invite code <span style="font-weight:400; opacity:0.75;">(only for creating a new account — leave blank to start a brand-new household)</span>
+      <input type="text" id="authInviteCode" autocomplete="off" placeholder="e.g. 7K4M9QXP" style="text-transform:uppercase;">
+    </label>
     <div class="row" style="margin-top:14px;">
       <button class="btn-primary" type="button" id="loginBtn">Log in</button>
       <button class="btn-secondary" type="button" id="signupBtn">Create account</button>
     </div>
-    <p class="footnote">First time? Enter an email and password you'll remember and click "Create account." Anyone who signs up can see and edit the shared pantry, so only share this login with your household.</p>
+    <p class="footnote">First time? Enter an email and password you'll remember and click "Create account." If someone in your household already has HomeHub set up, ask them for their household's invite code (Settings tab) and enter it above so you join their household instead of starting a new, empty one. Each household's data is private — only people who share your invite code can see or edit it.</p>
   </div>
 </div>
 
@@ -47,8 +50,8 @@
       <h1>🥫 Pantry Organizer</h1>
       <p>Track your pantry, plan meals, and cut food waste — synced across your household's devices.</p>
     </div>
-    <div style="text-align:right;">
-      <div class="row" style="justify-content:flex-end; align-items:center;">
+    <div class="header-right">
+      <div class="row header-right-row" style="justify-content:flex-end; align-items:center;">
         <span class="save-status" id="saveStatus">Syncing…</span>
         <div class="notif-wrap">
           <button class="btn-icon" type="button" id="notifBell" title="Notifications">🔔<span class="notif-badge" id="notifBadge" style="display:none;">0</span></button>
@@ -64,13 +67,14 @@
 
   <div class="tabs">
     <button class="tab-btn active" data-tab="dashboard">🏠 Dashboard</button>
-    <button class="tab-btn" data-tab="inventory">Inventory</button>
-    <button class="tab-btn" data-tab="quick">Quick count</button>
-    <button class="tab-btn" data-tab="recipes">Recipes</button>
-    <button class="tab-btn" data-tab="mealplan">Meal plan</button>
-    <button class="tab-btn" data-tab="shopping">Shopping list</button>
-    <button class="tab-btn" data-tab="spending">Spending</button>
-    <button class="tab-btn" data-tab="settings">Settings</button>
+    <button class="tab-btn" data-tab="inventory">📦 Inventory</button>
+    <button class="tab-btn" data-tab="organize">🗂️ Organize</button>
+    <button class="tab-btn" data-tab="quick">🔢 Quick count</button>
+    <button class="tab-btn" data-tab="recipes">🍳 Recipes</button>
+    <button class="tab-btn" data-tab="mealplan">📅 Meal plan</button>
+    <button class="tab-btn" data-tab="shopping">🛒 Shopping list</button>
+    <button class="tab-btn" data-tab="spending">💰 Spending</button>
+    <button class="tab-btn" data-tab="settings">⚙️ Settings</button>
   </div>
 
   <!-- DASHBOARD TAB -->
@@ -213,8 +217,12 @@
         <label class="field">Remind every (days)
           <input type="number" id="itemRestockDays" min="1" step="1" placeholder="14" style="width:90px;">
         </label>
+        <label class="field" style="flex:1; min-width:180px;">Notes (optional)
+          <input type="text" id="itemNotes" placeholder="e.g. store brand, for the kids' lunches">
+        </label>
       </div>
       <p class="footnote">Mark a staple and it'll show up on your shopping list as a restock reminder on that schedule, even if it's not technically low — good for things like paper towels or coffee that you buy on a rhythm rather than by count.</p>
+      <p class="footnote">Every field here resets after you add an item, including storage location — pick it fresh each time so nothing accidentally lands in the wrong fridge, freezer, or pantry. Once it's added, use the Organize tab to put it on a specific shelf or in a specific drawer.</p>
     </div>
 
     <div class="card">
@@ -244,6 +252,101 @@
       <div id="scanConfirmWrap" style="display:none;"></div>
     </div>
   </div>
+
+  <!-- EDIT ITEM MODAL -->
+  <div class="scan-modal" id="editItemModal" style="display:none;">
+    <div class="scan-modal-inner">
+      <div class="row" style="justify-content: space-between;">
+        <h2 style="margin:0;">Edit item</h2>
+        <button class="btn-secondary" type="button" id="closeEditItemBtn">Close</button>
+      </div>
+      <div class="row">
+        <label class="field" style="flex:1; min-width:160px;">Item name
+          <input type="text" id="editItemName">
+        </label>
+        <label class="field">Aisle / category
+          <select id="editItemCategory">
+            <option value="">— choose —</option>
+            <option>Produce</option>
+            <option>Grains &amp; Pasta</option>
+            <option>Canned &amp; Jarred</option>
+            <option>Baking</option>
+            <option>Spices &amp; Condiments</option>
+            <option>Snacks</option>
+            <option>Frozen</option>
+            <option>Dairy &amp; Eggs</option>
+            <option>Meat &amp; Seafood</option>
+            <option>Beverages</option>
+            <option>Cleaning &amp; Household</option>
+            <option>Other</option>
+          </select>
+        </label>
+      </div>
+      <div class="row" style="margin-top:10px;">
+        <label class="field">Quantity
+          <input type="number" id="editItemQty" min="0" step="1" style="width:90px;">
+        </label>
+        <label class="field">Unit
+          <input type="text" id="editItemUnit" style="width:110px;">
+        </label>
+        <label class="field">Low-stock at
+          <input type="number" id="editItemThreshold" min="0" step="1" style="width:90px;">
+        </label>
+        <label class="field">Expires
+          <input type="date" id="editItemExpiry">
+        </label>
+        <label class="field">Price paid
+          <input type="number" id="editItemPrice" min="0" step="0.01" style="width:100px;">
+        </label>
+      </div>
+      <div class="row" style="margin-top:10px;">
+        <label class="field">Storage location
+          <select id="editItemLocation"></select>
+        </label>
+        <label class="field">Exact spot (optional)
+          <select id="editItemSubLocation"></select>
+        </label>
+      </div>
+      <div class="row" style="margin-top:10px;">
+        <label class="field" style="flex-direction:row; align-items:center; gap:6px;">
+          <input type="checkbox" id="editItemStaple" style="width:auto;">
+          Keep this stocked (staple)
+        </label>
+        <label class="field">Remind every (days)
+          <input type="number" id="editItemRestockDays" min="1" step="1" style="width:90px;">
+        </label>
+      </div>
+      <label class="field" style="margin-top:10px;">Notes (optional)
+        <input type="text" id="editItemNotes">
+      </label>
+      <div class="row" style="margin-top:16px;">
+        <button class="btn-primary" type="button" id="saveEditItemBtn">Save changes</button>
+        <button class="btn-secondary" type="button" id="cancelEditItemBtn">Cancel</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ORGANIZE TAB -->
+  <section id="tab-organize" style="display:none;">
+    <div class="card">
+      <h2>Organize</h2>
+      <p class="sub">Assign items to the shelf, drawer, or door they actually sit on, so you can find them at a glance. Pick a location, then move items down into wherever they belong — no dragging required.</p>
+      <div class="row">
+        <label class="field">Storage location
+          <select id="organizeLocationSelect"></select>
+        </label>
+        <label class="field">This location organizes like a
+          <select id="organizeKindSelect">
+            <option value="Pantry">Pantry</option>
+            <option value="Refrigerator">Refrigerator</option>
+            <option value="Freezer">Freezer</option>
+            <option value="Other">Other</option>
+          </select>
+        </label>
+      </div>
+      <div id="organizeWrap" style="margin-top:10px;"></div>
+    </div>
+  </section>
 
   <!-- QUICK COUNT TAB -->
   <section id="tab-quick" style="display:none;">
@@ -433,6 +536,29 @@
     </div>
 
     <div class="card">
+      <h2>Household</h2>
+      <p class="sub">Your data is private to your household — only people who sign up or log in with this invite code see or edit it.</p>
+      <div class="row" style="align-items:center;">
+        <label class="field" style="max-width:220px;">Invite code
+          <input type="text" id="householdInviteCodeDisplay" readonly style="font-family:monospace; letter-spacing:1px; font-weight:600;">
+        </label>
+        <button class="btn-secondary" type="button" id="copyInviteCodeBtn" style="margin-top:20px;">Copy code</button>
+      </div>
+      <p class="footnote" id="copyInviteCodeStatus"></p>
+      <details style="margin-top:14px;">
+        <summary style="cursor:pointer; font-weight:600;">Join a different household</summary>
+        <p class="sub" style="margin-top:8px;">Switches your login to another household's data. You'll stop seeing this household's pantry and start seeing the one for the code you enter — use this if you signed up before getting the right invite code.</p>
+        <div class="row">
+          <label class="field" style="max-width:220px;">Invite code
+            <input type="text" id="joinHouseholdCodeInput" autocomplete="off" placeholder="e.g. 7K4M9QXP" style="text-transform:uppercase;">
+          </label>
+          <button class="btn-danger" type="button" id="joinHouseholdBtn" style="margin-top:20px;">Switch household</button>
+        </div>
+        <p class="footnote" id="joinHouseholdStatus"></p>
+      </details>
+    </div>
+
+    <div class="card">
       <h2>Household members</h2>
       <p class="sub">Everyone who's logged in shows up here automatically. Roles are for your own organization — a "Kid" role hides the Spending and Settings tabs for that person.</p>
       <div id="householdMembersWrap"></div>
@@ -458,6 +584,18 @@
 
     <p class="footnote">Low-stock and "expiring soon" thresholds are just a starting point — adjust the numbers on each item to fit how you actually shop. Shopping-list quantities from meal plans are estimates: ingredients are matched by name across your storage locations.</p>
   </section>
+
+  <!-- MOBILE BOTTOM NAV — the 5 most-used sections, one tap away. Reuses the same .tab-btn
+       activation logic/state as the top tab row (see activateTab() in app.js), so it's just
+       another set of buttons pointing at the same tabs rather than a separate nav system.
+       Hidden on wider screens where the top tab row is already easy to reach. -->
+  <nav class="bottom-nav" id="bottomNav">
+    <button class="tab-btn bottom-nav-btn" type="button" data-tab="dashboard" onclick="pantryApp.goToTab('dashboard')"><span class="bn-icon">🏠</span>Home</button>
+    <button class="tab-btn bottom-nav-btn" type="button" data-tab="inventory" onclick="pantryApp.goToTab('inventory')"><span class="bn-icon">📦</span>Inventory</button>
+    <button class="tab-btn bottom-nav-btn" type="button" data-tab="quick" onclick="pantryApp.goToTab('quick')"><span class="bn-icon">🔢</span>Quick</button>
+    <button class="tab-btn bottom-nav-btn" type="button" data-tab="recipes" onclick="pantryApp.goToTab('recipes')"><span class="bn-icon">🍳</span>Recipes</button>
+    <button class="tab-btn bottom-nav-btn" type="button" data-tab="shopping" onclick="pantryApp.goToTab('shopping')"><span class="bn-icon">🛒</span>Shopping</button>
+  </nav>
 </div>
 
 <!-- UNDO TOAST -->

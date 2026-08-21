@@ -309,6 +309,16 @@ tr.expiring td.exp-cell { color: var(--terracotta-dark); font-weight: 700; }
 .quick-location-group { margin-bottom: 10px; }
 .quick-location-group .category-heading { padding-top: 8px; }
 .quick-location-group:first-child .category-heading { padding-top: 0; }
+.quick-item.out-of-stock { opacity: 0.7; border-style: dashed; }
+
+/* Organize tab */
+.organize-box { border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px; margin-bottom: 10px; background: #FDFBF7; }
+.organize-box.out-of-stock { border-style: dashed; opacity: 0.85; }
+.organize-box-heading { font-weight: 700; font-size: 0.8rem; text-transform: uppercase; letter-spacing: 0.03em; color: var(--sage-dark); margin-bottom: 6px; }
+.organize-item { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; padding: 6px 0; border-bottom: 1px solid var(--line); font-size: 0.88rem; }
+.organize-item:last-child { border-bottom: none; }
+.organize-item-name { font-weight: 600; }
+.organize-item select { margin-left: auto; }
 
 /* Required-field validation on the Add Item form */
 .input-invalid {
@@ -329,6 +339,15 @@ tr.expiring td.exp-cell { color: var(--terracotta-dark); font-weight: 700; }
 }
 
 .shopping-item.checked .label { text-decoration: line-through; color: var(--muted); }
+
+/* Clickable Dashboard summary pills/rows — a visual hint that these are shortcuts, not just
+   static numbers. Buttons and checkboxes inside a dash-click row keep their own click handling;
+   nothing here is nested inside an already-clickable control. */
+.dash-click { cursor: pointer; border-radius: 8px; transition: background 0.12s ease; }
+.dash-click:hover { background: #F1ECE0; }
+body.dark-theme .dash-click:hover { background: #2D2F34; }
+span.pill.dash-click { cursor: pointer; }
+span.pill.dash-click:hover { filter: brightness(0.95); }
 
 .search-input { flex: 1; min-width: 160px; }
 
@@ -586,7 +605,9 @@ body.dark-theme .quick-item,
 body.dark-theme .recipe-card,
 body.dark-theme .inv-card,
 body.dark-theme .readiness-card,
+body.dark-theme .organize-box,
 body.dark-theme .auth-card { background: #2A2C31; }
+body.dark-theme .organize-box-heading { color: var(--sage-dark); }
 body.dark-theme .btn-secondary { background: #33353A; color: var(--ink); }
 body.dark-theme .btn-secondary:hover { background: #3D3F45; }
 body.dark-theme .btn-icon { background: #33353A; color: var(--ink); }
@@ -605,3 +626,118 @@ body.dark-theme .notif-row:hover { background: #2D2F34; }
 body.dark-theme .shopping-section-heading { color: var(--sage-dark); }
 body.dark-theme .trend-section-heading { color: var(--sage-dark); }
 body.dark-theme .trend-bar-track { background: var(--line); }
+
+/* ==========================================================================
+   Mobile-first pass
+   The app was originally laid out for desktop and just reflowed on a small
+   screen (flex-wrap doing most of the work). This section makes phone-sized
+   viewports feel designed for a phone rather than a shrunk desktop page:
+   a bottom nav for the most-used sections, bigger tap targets, modals that
+   behave like phone sheets instead of small centered dialogs, forms that
+   stack one field per line, and no horizontal scrolling anywhere.
+   ========================================================================== */
+
+.header-right { text-align: right; }
+
+/* Bottom nav bar — hidden by default (desktop/tablet keep using the top tab
+   row); the media query below turns it on for phone-width screens. Reuses
+   the existing .tab-btn active/inactive state from activateTab() in app.js,
+   so no extra JS is needed to keep it in sync with whichever tab is open. */
+.bottom-nav {
+  display: none;
+  position: fixed;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 950;
+  background: var(--card);
+  border-top: 1px solid var(--line);
+  box-shadow: 0 -2px 10px rgba(0,0,0,0.06);
+}
+.tab-btn.bottom-nav-btn {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 2px;
+  border: none;
+  border-radius: 0;
+  background: transparent;
+  color: var(--muted);
+  font-size: 0.66rem;
+  padding: 8px 4px calc(6px + env(safe-area-inset-bottom, 0px));
+  min-height: 56px;
+}
+.tab-btn.bottom-nav-btn .bn-icon { font-size: 1.25rem; line-height: 1; }
+.tab-btn.bottom-nav-btn.active { background: transparent; color: var(--sage-dark); }
+
+@media (max-width: 700px) {
+  body { -webkit-text-size-adjust: 100%; }
+  html, body { overflow-x: hidden; }
+
+  .wrap { padding: 18px 14px calc(88px + env(safe-area-inset-bottom, 0px)); }
+
+  /* Stack the header instead of squeezing title + status/logout onto one row. */
+  header.page-header { flex-direction: column; align-items: stretch; gap: 10px; }
+  .header-right { text-align: left; }
+  .header-right-row { justify-content: flex-start !important; }
+
+  /* Top tab row becomes a horizontally-scrolling strip rather than wrapping
+     into a multi-line block of pill buttons — every tab (including ones not
+     on the bottom nav, like Organize/Meal plan/Spending/Settings) stays one
+     swipe away instead of pushing page content down. */
+  .tabs {
+    flex-wrap: nowrap;
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+    padding-bottom: 4px;
+    margin: 14px 0;
+  }
+  .tabs .tab-btn { flex-shrink: 0; }
+
+  .bottom-nav { display: flex; }
+
+  /* Bigger tap targets everywhere, and 16px inputs so iOS Safari doesn't
+     zoom the page in on focus (anything under 16px triggers that). */
+  button { min-height: 44px; padding: 11px 16px; }
+  .btn-icon { min-width: 44px; min-height: 44px; padding: 4px 10px; }
+  .tab-btn:not(.bottom-nav-btn) { padding: 10px 16px; }
+  .filter-chip { padding: 8px 14px; min-height: 36px; }
+  select, input[type="text"], input[type="number"], input[type="date"], input[type="email"], input[type="password"], textarea {
+    font-size: 1rem;
+    padding: 11px 12px;
+    min-height: 44px;
+  }
+
+  /* Forms: one field per line instead of several cramped columns, so labels
+     and inputs stay full-width and easy to tap/read without zooming. */
+  .row > label.field { flex: 1 1 100%; min-width: 0; }
+  .row > label.field input:not([type="checkbox"]),
+  .row > label.field select { width: 100% !important; }
+
+  /* Modals behave like a phone sheet: full-width, anchored to the bottom,
+     rounded only on top, capped height with its own internal scroll — not
+     a small centered box with a lot of dead space around it. */
+  .scan-modal { padding: 0; align-items: flex-end; }
+  .scan-modal-inner {
+    width: 100%;
+    max-width: 100%;
+    max-height: 92vh;
+    border-radius: 16px 16px 0 0;
+    padding: 18px 16px calc(18px + env(safe-area-inset-bottom, 0px));
+  }
+
+  /* Dashboard/Inventory/Quick-count/Organize cards already stack vertically
+     (each .card is a block-level element) — just tighten spacing a bit. */
+  .card { padding: 16px; margin-bottom: 14px; }
+
+  .quick-grid, .inv-card-grid { grid-template-columns: 1fr; }
+}
+
+@media (max-width: 420px) {
+  .notif-panel { width: calc(100vw - 40px); right: -6px; }
+  .auth-card { padding: 20px; }
+}
+
+body.dark-theme .bottom-nav { border-top-color: var(--line); background: var(--card); }

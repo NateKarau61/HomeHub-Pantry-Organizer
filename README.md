@@ -1,12 +1,14 @@
 # Pantry Organizer
 
-A free pantry tracker and meal planner — inspired by [PantryTrack](https://pantrytrack.app/)'s "track your pantry, plan meals, cut food waste" idea, built as a simple static site like your [Budget Planner](https://natekarau61.github.io/Budget-Planner/). Everyone in your household logs in with their own email/password account, and everyone sees and edits the same shared pantry, recipes, meal plan, and shopping list — synced instantly across every device via Firebase.
+A free pantry tracker and meal planner — inspired by [PantryTrack](https://pantrytrack.app/)'s "track your pantry, plan meals, cut food waste" idea, built as a simple static site like your [Budget Planner](https://natekarau61.github.io/Budget-Planner/). Each household is its own private space: everyone in a household logs in with their own email/password account and shares one pantry, recipes, meal plan, and shopping list — synced instantly across every device via Firebase — but different households never see or affect each other's data. New households are created automatically the first time someone signs up; joining an existing one just takes that household's invite code (shown on its Settings tab).
 
 **Live demo:** enable GitHub Pages on this repo (see below) and it'll be at `https://<your-username>.github.io/Pantry-Organizer/`
 
 ## Features
 
-- **Individual logins, one shared pantry** — everyone in the household creates their own account (email + password), and all accounts read/write the same shared data. Changes made on one phone show up on everyone else's device within a second or two.
+- **Individual logins, one shared pantry per household** — everyone in a household creates their own account (email + password), and all of that household's accounts read/write the same shared data. Changes made on one phone show up on everyone else's device within a second or two.
+- **Designed for phones, not just shrunk down** — a fixed bottom nav for the 5 most-used sections (Dashboard, Inventory, Quick count, Recipes, Shopping), a horizontally-scrollable top tab row for everything else, one-field-per-line forms, 44px+ tap targets, and modals that open as a full-width bottom sheet instead of a small centered box. See "Notes on the mobile layout" below.
+- **Multiple isolated households** — signing up with no invite code starts a brand-new, empty household just for you; entering an existing household's invite code at signup joins that one instead. A household's invite code lives on its Settings tab (with a copy button) so you can hand it to the next person joining, and "Join a different household" there lets a login switch to another household's code later. See "Notes on multi-household support" below for how this is enforced and what it means for data already stored under the old single-shared-pantry model.
 - **Dashboard** — the first thing you see after logging in: a one-glance summary (items in stock, low-stock count, expiring-soon count, and an estimated pantry value if you've logged any prices), a Pantry Health Score, a "Needs attention" list of what's running low or expiring across every location — leftovers about to go bad show up here too — (with any recipes that use those items called out), your top-ready recipes, this week's meal plan, how many items are on your shopping list, what's in your leftovers, and what's been used lately — plus quick-action buttons to add an item, scan a barcode, or jump to recipes.
 - **Pantry Health Score** — a 0–100 score on the Dashboard summarizing how things are going overall, with its breakdown always shown alongside it rather than as an unexplained number: stock levels, freshness (how much is expired), whether staples are on schedule, and how much has gone to waste lately versus how much got used.
 - **In-app notifications** — a 🔔 bell in the header (visible from any tab) with a badge count for anything that needs a look: low stock, staple restock reminders, items expiring within 2 days, and leftovers about to go bad. Click it to see the list and dismiss individual alerts or all of them at once — a dismissed alert stays hidden only while its underlying cause is still true, so it resurfaces on its own if the same thing happens again later (e.g. it goes low again after being restocked).
@@ -58,17 +60,25 @@ The app needs a free Firebase project to handle logins and store the shared pant
    rules_version = '2';
    service cloud.firestore {
      match /databases/{database}/documents {
-       match /households/{docId} {
-         allow read, write: if request.auth != null;
+       match /households/{householdId} {
+         allow read, update: if request.auth != null
+           && request.auth.token.email in resource.data.householdMembers;
+         allow create: if request.auth != null
+           && request.auth.token.email in request.resource.data.householdMembers;
+       }
+       match /memberships/{email} {
+         allow read, write: if request.auth != null && request.auth.token.email == email;
        }
      }
    }
    ```
-   This means: anyone who's logged in can read/write the shared household document, and nobody logged out can touch it. Click **Publish**.
+   This is stricter than a single "if logged in" check: it only lets someone read or write a household document if their own logged-in email is already listed in that document's `householdMembers` map (checked with `resource.data` for reads/updates, `request.resource.data` for the initial create, since a doc that doesn't exist yet has no `resource.data` to check against) — so being logged in to *a* household no longer means you can read or edit a *different* one. The `memberships` collection is likewise locked to each person only ever reading/writing their own `memberships/{their email}` document, since that's what tells the app which household to load. Click **Publish**.
+
+   **If you already deployed with the older, simpler rule** (`allow read, write: if request.auth != null;` on `/households/{docId}`), you can leave that in place temporarily — the app will still work, just without real per-household enforcement (anyone logged in to any household could, in principle, read or edit another one by guessing/knowing its invite code and editing Firestore directly, though the app's own UI never does this). Switch to the rules above once you've confirmed your existing household(s) migrated correctly (see "Notes on multi-household support" below) and everyone's `householdMembers` map looks right.
 5. Go to **Project settings** (gear icon, top left) → scroll to **Your apps** → click the **`</>`** (web) icon to register a new web app. Give it any nickname and click **Register app**. Firebase will show you a `firebaseConfig` object — copy it.
 6. Open `firebase-config.js` in this repo and paste your copied values in, replacing the `PASTE_YOUR_..._HERE` placeholders. Commit the change.
 7. Back in **Authentication → Settings → Authorized domains**, click **Add domain** and add your GitHub Pages domain, e.g. `<your-username>.github.io`.
-8. Visit your live site, click "Create account," and you're in. Share that same login (or have each household member create their own account) — everyone will see the same pantry.
+8. Visit your live site, click "Create account" with no invite code, and you're in — this starts a brand-new household. To add the rest of your household, open Settings, copy the invite code shown there, and have each person enter it in the "Household invite code" field on the sign-up screen when they create their own account. Everyone who signs up with that code (or logs back in later) lands in the same shared pantry; nobody else can see it.
 
 `firebase-config.js` is safe to commit to a public repo — the values in it aren't secret; the Firestore rules above are what actually control access.
 
@@ -116,6 +126,20 @@ The score is a heuristic, not a precise measurement, and it's most meaningful on
 
 Anyone can sign up for their own account and start using the shared pantry — the roles here (Owner/Member/Kid) are just a label for who's who, editable by anyone in Settings. The only thing a role actually changes is that "Kid" hides the Spending and Settings tabs for that person's own login. It is not a security feature: the underlying Firestore rule (see the setup section above) only checks that someone is logged in, not who — so a household member could still see or change anything by hand if they wanted to, regardless of their assigned role. If you want real access control, that would need a different Firestore rules setup keyed off each person's role, which isn't what's implemented here.
 
+## Notes on multi-household support
+
+Each household's pantry data lives in its own Firestore document (`households/{inviteCode}` — the invite code doubles as that document's ID), and a separate `memberships/{email}` document maps each login to the one household it belongs to. Signing up with no invite code always creates a brand-new household; signing up with a valid invite code joins whoever already owns that code. Logging back in (no invite code needed at that point) just looks up your existing membership and reopens the same household you were already in — invite codes are only consulted for a login that doesn't have a membership yet.
+
+If this site was already running under the older single-shared-pantry model, that data lived in one fixed document, `households/shared`. The first time any of your existing logins signs in after this update, the app notices it has no membership yet, finds that old document, and automatically copies its contents into a brand-new household — registering every email already listed in its member roster (not just whoever happened to log in first) so the rest of your household lands in that same migrated household as they log in over the following days, rather than each accidentally starting their own empty one. The old `households/shared` document itself is left in place afterward rather than deleted, just in case; it's safe to ignore or delete by hand later once you've confirmed everyone migrated correctly.
+
+One accepted edge case from that migration: if two members of an old shared household happen to log in for the first time after the update within moments of each other, it's possible for each to trigger the migration before the other's membership is registered, resulting in two separate new households each holding a copy of the old data instead of one. This is unlikely (it needs near-simultaneous first logins) and not destructive (no data is lost, just possibly split), but if it happens, have everyone confirm they're seeing the same invite code in Settings — if not, have the smaller group use "Join a different household" with the other group's code to reunite.
+
+"Join a different household" (Settings tab) is meant for fixing a wrong invite code at signup, not for regularly switching between multiple households — a login only ever belongs to one household at a time, and switching immediately stops that login from seeing its previous household (though that household's data isn't touched or lost — the login can always switch back with its original code).
+
+## Notes on the mobile layout
+
+The top tab row and the bottom nav bar both drive the same tab-switching code and stay in sync automatically — the bottom nav is just a second, thumb-friendly way to reach the 5 busiest sections (Dashboard, Inventory, Quick count, Recipes, Shopping) on a phone-width screen; every tab, including ones not on it (Organize, Meal plan, Spending, Settings), is still one swipe away on the top row, which scrolls horizontally instead of wrapping once the screen gets narrow. Add Item, Edit Item, and the barcode-scan screen switch to a full-width sheet that slides up from the bottom of the screen rather than a small centered popup, so there's no cramped scrolling inside a tiny box. This all kicks in under roughly 700px of viewport width — a real desktop browser window resized narrow will see the same phone layout, which is expected.
+
 ## What's next
 
 This has come together in a few planned rounds of improvements.
@@ -126,4 +150,6 @@ This has come together in a few planned rounds of improvements.
 
 **Round 3** (this one) built the rest of the original wish list: a dedicated food-waste tracker (separate from leftovers), a monthly grocery budget with a progress bar, spending trends (6-month history + this-month-by-category), household members with an organizational Owner/Member/Kid role (Kid hides Spending/Settings), and the Pantry Health Score.
 
-That's everything from the original wish list except two items that were intentionally not planned as-is, for reasons flagged at the very start of this project: an AI chat assistant (it would need an API key with a per-request cost, and that key would be visible to anyone sharing the household login) and true push notifications (this is a static site with no backend to send them from) — the in-app notification bell covers the same need without either of those tradeoffs. Everything else is now built; further rounds would mean refining what's here rather than adding net-new sections.
+That's everything from the original wish list except two items that were intentionally not planned as-is, for reasons flagged at the very start of this project: an AI chat assistant (it would need an API key with a per-request cost, and that key would be visible to anyone sharing the household login) and true push notifications (this is a static site with no backend to send them from) — the in-app notification bell covers the same need without either of those tradeoffs.
+
+**Round 4** (this one) focused on making the app feel more like a real household tool day-to-day rather than adding new tracking categories: every Dashboard summary card is now clickable and routes straight to the right filtered tab; the "Add an item" form fully resets after every add — including storage location, which used to (deliberately) carry over — so a new item can't silently land in the wrong fridge, freezer, or pantry; clicking an item's name in Current Inventory opens an Edit Item screen instead of requiring delete-and-recreate; a new Organize tab assigns items to a specific shelf, drawer, or door within a location via a simple "move → pick a location" dropdown; an item hitting zero quantity is now treated as out-of-stock (tucked under its own filter/section, not deleted) and picks back up right where it was once restocked; the whole app got a genuine mobile-first pass rather than a shrunk desktop layout (see "Notes on the mobile layout"); and — the biggest structural change — the app now supports multiple separate households instead of one single shared pantry for everyone who ever signs up, with an invite-code system for joining an existing household and an automatic migration path for accounts that were already using the old single-household version (see "Notes on multi-household support").
