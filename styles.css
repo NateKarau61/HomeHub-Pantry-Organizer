@@ -310,6 +310,7 @@ tr.expiring td.exp-cell { color: var(--terracotta-dark); font-weight: 700; }
 .quick-location-group .category-heading { padding-top: 8px; }
 .quick-location-group:first-child .category-heading { padding-top: 0; }
 .quick-item.out-of-stock { opacity: 0.7; border-style: dashed; }
+.quick-move-select { width: 100%; margin-top: 8px; font-size: 0.78rem; padding: 6px 8px; }
 
 /* Organize tab */
 .organize-box { border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px; margin-bottom: 10px; background: #FDFBF7; }
@@ -339,6 +340,9 @@ tr.expiring td.exp-cell { color: var(--terracotta-dark); font-weight: 700; }
 }
 
 .shopping-item.checked .label { text-decoration: line-through; color: var(--muted); }
+.shopping-item-checkable { cursor: pointer; }
+.shopping-item-checkable:hover { background: #F6F2E8; border-radius: 8px; }
+body.dark-theme .shopping-item-checkable:hover { background: #2D2F34; }
 
 /* Clickable Dashboard summary pills/rows — a visual hint that these are shortcuts, not just
    static numbers. Buttons and checkboxes inside a dash-click row keep their own click handling;
@@ -709,6 +713,8 @@ body.dark-theme .trend-bar-track { background: var(--line); }
     padding: 11px 12px;
     min-height: 44px;
   }
+  .quick-move-select { min-height: 44px; font-size: 0.85rem; }
+  .shopping-item input[type="checkbox"] { width: 22px; height: 22px; }
 
   /* Forms: one field per line instead of several cramped columns, so labels
      and inputs stay full-width and easy to tap/read without zooming. */

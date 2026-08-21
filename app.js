@@ -1477,24 +1477,74 @@
   document.getElementById("searchInput").addEventListener("input", renderInventory);
 
   // ---------------- Quick count ----------------
-  // Shows every storage location stacked on top of each other (each with its own heading and
-  // its own tap +/- grid), rather than only whichever one is picked in "Add an item" — so this
-  // stays useful even before/without a location chosen there.
+  // Shows every storage location stacked on top of each other by default (each with its own
+  // heading and its own tap +/- grid), rather than only whichever one is picked in "Add an
+  // item" — so this stays useful even before/without a location chosen there. The "Show"
+  // filter narrows that down to one location at a time for a faster walk-through of just one
+  // fridge/freezer/pantry; it's not persisted, same as the Inventory filter chips.
+  let quickLocationFilter = "all";
+
+  function renderQuickLocationFilterSelect() {
+    const sel = document.getElementById("quickLocationFilterSelect");
+    if (!sel) return;
+    const names = Object.keys(state.pantries);
+    if (quickLocationFilter !== "all" && names.indexOf(quickLocationFilter) === -1) quickLocationFilter = "all";
+    sel.innerHTML = `<option value="all">All locations</option>` +
+      names.map(n => `<option value="${escapeHtml(n)}" ${n === quickLocationFilter ? "selected" : ""}>${escapeHtml(n)}</option>`).join("");
+  }
+
+  function setQuickLocationFilter(value) {
+    quickLocationFilter = value;
+    renderQuickCount();
+  }
+
+  // Moves an item straight to a different storage location from Quick Count, without opening
+  // the full Edit Item modal — mirrors the location-move that already happens in saveEditItem().
+  // Clears subLocation on the move since the old shelf/drawer name may not exist in the new
+  // location's kind (Refrigerator/Freezer/Pantry/Other) — same as changing location in Edit Item
+  // resets the sub-location picker. The item just shows as unplaced until re-assigned there.
+  function moveItemToPantry(fromLocation, id, toLocation) {
+    if (!toLocation || toLocation === fromLocation) return;
+    const fromData = state.pantries[fromLocation];
+    const toData = state.pantries[toLocation];
+    if (!fromData || !toData) return;
+    const idx = fromData.items.findIndex(i => i.id === id);
+    if (idx === -1) return;
+    const item = fromData.items[idx];
+    fromData.items.splice(idx, 1);
+    item.subLocation = null;
+    toData.items.push(item);
+    logActivity("edit", `Moved "${item.name}" from ${escapeHtml(fromLocation)} to ${escapeHtml(toLocation)}`);
+    saveState();
+    renderAll();
+  }
+
   function renderQuickCount() {
+    renderQuickLocationFilterSelect();
     const container = document.getElementById("quickGrid");
     const emptyNote = document.getElementById("quickEmptyNote");
-    const locations = Object.keys(state.pantries);
-    const nonEmptyLocations = locations.filter(loc => state.pantries[loc].items.length > 0);
+    const allLocationNames = Object.keys(state.pantries);
+    const nonEmptyLocations = allLocationNames.filter(loc => state.pantries[loc].items.length > 0);
+    const shownLocations = quickLocationFilter === "all" ? nonEmptyLocations : nonEmptyLocations.filter(loc => loc === quickLocationFilter);
 
     if (nonEmptyLocations.length === 0) {
       container.innerHTML = "";
+      emptyNote.textContent = "Add items in the Inventory tab first, then they'll show up here for quick counting.";
+      emptyNote.style.display = "";
+      return;
+    }
+    if (shownLocations.length === 0) {
+      container.innerHTML = "";
+      emptyNote.textContent = `Nothing in ${quickLocationFilter} yet — pick a different location above, or add an item there from the Inventory tab.`;
       emptyNote.style.display = "";
       return;
     }
     emptyNote.style.display = "none";
 
-    container.innerHTML = nonEmptyLocations.map(loc => {
+    container.innerHTML = shownLocations.map(loc => {
       const items = state.pantries[loc].items;
+      const moveOptions = allLocationNames.filter(l => l !== loc)
+        .map(l => `<option value="${escapeHtml(l)}">${escapeHtml(l)}</option>`).join("");
       return `
         <div class="quick-location-group">
           <div class="category-heading">${escapeHtml(loc)}</div>
@@ -1510,6 +1560,11 @@
                   <span class="count">${item.qty}</span>
                   <button class="btn-icon" onclick="pantryApp.adjustQty('${escapeForInlineJs(loc)}', '${item.id}', 1)">${outOfStock ? "+ Restock" : "+"}</button>
                 </div>
+                ${moveOptions ? `
+                <select class="quick-move-select" title="Move to a different location" onchange="if(this.value){pantryApp.moveItemToPantry('${escapeForInlineJs(loc)}', '${item.id}', this.value);} this.value='';">
+                  <option value="">Move to…</option>
+                  ${moveOptions}
+                </select>` : ""}
               </div>
             `; }).join("")}
           </div>
@@ -1517,6 +1572,8 @@
       `;
     }).join("");
   }
+
+  document.getElementById("quickLocationFilterSelect").addEventListener("change", e => setQuickLocationFilter(e.target.value));
 
   // ---------------- Organize (physical storage placement) ----------------
   // Not persisted — like the Inventory filter chips, this is just "which location am I looking
@@ -2319,7 +2376,7 @@
       const cost = estimatedCost(item, qty);
       if (cost != null) { grandTotal += cost; anyPriced = true; }
       return `
-        <div class="shopping-item ${checked ? "checked" : ""}">
+        <div class="shopping-item shopping-item-checkable ${checked ? "checked" : ""}" onclick="if(!event.target.closest('input,button')){this.querySelector('input[type=checkbox]').click();}">
           <input type="checkbox" ${checked ? "checked" : ""} onchange="pantryApp.toggleAutoChecked('${key}')">
           <span class="label">${escapeHtml(item.name)}${item.unit ? " (" + escapeHtml(item.unit) + ")" : ""}</span>
           <span class="pill ${badgeClass}">${badgeText} · ${escapeHtml(location)}</span>
@@ -2342,7 +2399,7 @@
         </div>`;
     });
     const extraRows = extras.map(ex => `
-      <div class="shopping-item ${ex.checked ? "checked" : ""}">
+      <div class="shopping-item shopping-item-checkable ${ex.checked ? "checked" : ""}" onclick="if(!event.target.closest('input,button')){this.querySelector('input[type=checkbox]').click();}">
         <input type="checkbox" ${ex.checked ? "checked" : ""} onchange="pantryApp.toggleExtraChecked('${ex.id}')">
         <span class="label">${escapeHtml(ex.label)}${ex.qty ? " — need " + ex.qty : ""}</span>
         ${ex.source === "mealplan" ? '<span class="pill amber">from meal plan</span>' : ""}
@@ -3363,7 +3420,8 @@
     openEditItem, closeEditItemModal, saveEditItem, subLocationsFor,
     goToInventoryFilter, renderOrganize, setOrganizeLocation, setOrganizeKind, moveItemToSubLocation,
     resolveHouseholdAndSync, migrateLegacyOrCreateHousehold, joinDifferentHousehold, copyInviteCode,
-    getCurrentHouseholdId: () => currentHouseholdId, generateInviteCode
+    getCurrentHouseholdId: () => currentHouseholdId, generateInviteCode,
+    setQuickLocationFilter, moveItemToPantry
   };
 
   // ---------------- Full render ----------------
@@ -3399,7 +3457,8 @@
     dismissNotification, clearAllNotifications, setMemberRole, wasteItem, pantryHealthScore,
     goToInventoryFilter, openEditItem, closeEditItemModal, saveEditItem,
     setOrganizeLocation, setOrganizeKind, moveItemToSubLocation,
-    joinDifferentHousehold, copyInviteCode
+    joinDifferentHousehold, copyInviteCode,
+    setQuickLocationFilter, moveItemToPantry
   };
 
   startAuthFlow();
